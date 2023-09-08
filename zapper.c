@@ -83,6 +83,9 @@ static union u {
 #define CDB(a)        "\033[0;34m"a"\033[0m"
 #define CDM(a)        "\033[0;35m"a"\033[0m"
 #define CDC(a)        "\033[0;36m"a"\033[0m"
+#define CR(a)         "\033[1;31m"a"\033[0m"
+#define CG(a)         "\033[1;32m"a"\033[0m"
+#define CY(a)         "\033[1;33m"a"\033[0m"
 #define CM(a)         "\033[1;35m"a"\033[0m"
 #define CC(a)         "\033[1;36m"a"\033[0m"
 #define CW(a)         "\033[1;37m"a"\033[0m"
@@ -205,6 +208,8 @@ do_getopts(int argc, char *argv[])
                 // e.g. shell -> zapper -> orig
                 g_flags |= FL_FORCE_TRACER_IS_PARENT;
                 break;
+            case '?':
+                usage();
         }
     }
 
@@ -300,7 +305,8 @@ ptsetoptions(pid_t pid) {
     // execve() delivers an extra TRAP, ignore it:
     // https://manpages.debian.org/bookworm/manpages-dev/ptrace.2.en.html
 
-    XFAIL(ptrace(PTRACE_SETOPTIONS, pid, NULL, PTRACE_O_TRACESYSGOOD | PTRACE_O_EXITKILL | PTRACE_O_TRACEFORK | PTRACE_O_TRACEVFORK | PTRACE_O_TRACECLONE | PTRACE_O_TRACEEXEC) != 0, "ptrace %s\n", strerror(errno));
+    // XFAIL(ptrace(PTRACE_SETOPTIONS, pid, NULL, PTRACE_O_TRACESYSGOOD | PTRACE_O_EXITKILL | PTRACE_O_TRACEFORK | PTRACE_O_TRACEVFORK | PTRACE_O_TRACECLONE | PTRACE_O_TRACEEXEC) != 0, "ptrace %s\n", strerror(errno));
+    XFAIL(ptrace(PTRACE_SETOPTIONS, pid, NULL, PTRACE_O_TRACESYSGOOD | PTRACE_O_EXITKILL | PTRACE_O_TRACEFORK | PTRACE_O_TRACEVFORK | PTRACE_O_TRACEEXEC) != 0, "ptrace %s\n", strerror(errno));
 }
 
 static pid_t
@@ -360,7 +366,6 @@ ptrace_until_execve(pid_t *pidp, struct user_regs_struct *regsp, int *status) {
     void *data = NULL;
 
     *status = 0;
-    // Continue until execve().
     while(1) {
         if ((pid > 0) && (ptrace(PTRACE_CONT, pid, NULL, data) != 0))
             GOTOERR("ptrace(%d): %s\n", pid, strerror(errno));
@@ -369,6 +374,7 @@ ptrace_until_execve(pid_t *pidp, struct user_regs_struct *regsp, int *status) {
             GOTOERR("waitpid()=%d: %s\n", pid, strerror(errno));
         *pidp = pid;
         if (WIFEXITED(*status)) {
+            DEBUGF("pid="CY("%d")" "CG("exited")".\n", pid);
             if (pid == g_pid_master)
                 exit(WEXITSTATUS(*status)); // tracee exited. Exit with same error code.
             pid = 0;
@@ -377,19 +383,21 @@ ptrace_until_execve(pid_t *pidp, struct user_regs_struct *regsp, int *status) {
         if (WIFSIGNALED(*status)) {
             // Tracee was termianted with a signal
             signum = WTERMSIG(*status);
-            DEBUGF("Tracee received TERMSIG SIGNAL-%d\n", signum);
+            DEBUGF(CY("%d ")CDY("terminated")" by SIG-%d\n", pid, signum);
             if (pid == g_pid_master) {
                 if (signum == SIGSEGV)
                     exit(128 + signum); // Do not generate core dump of zapper.
                 // Tracer to commit suicide with same signal as tracee died.
                 if (g_flags & IS_SIGNAL_PROXY)
                     signal(signum, SIG_DFL);
+                DEBUGF(CR("SUICIDE\n"));
                 kill(getpid(), signum);
             }
             pid = 0;
             continue;
         }
         if (!WIFSTOPPED(*status)) {
+            ERREXIT(255, "SHOULD NOT HAPEN?\n");
             // SHOULD NOT HAPPEN
             pid = 0;
             continue;
@@ -400,15 +408,18 @@ ptrace_until_execve(pid_t *pidp, struct user_regs_struct *regsp, int *status) {
         signum = WSTOPSIG(*status);
         if (! (signum & 0x80)) {
             // Signal was for TRACEE (not tracer)
-            DEBUGF("pid=%d received SIGNAL %d for TRACEE (event=%d?)\n", pid, signum, (*status >> 16) & 0xffff);
             if (signum == SIGTRAP) {
+                DEBUGF("Event for "CY("%d")" ("CDG("event=%d")")\n", pid, (*status >> 16) & 0xffff);
+                // NOTE: Stop occures in parent, not the newly created thread.
                 switch ((*status >> 16) & 0xffff) {
+                    case PTRACE_EVENT_CLONE: // 3
+                        DEBUGF(CDR("CLONE()")" not implemented\n");
+                        break;
                     case PTRACE_EVENT_FORK:  // 1
-                    case PTRACE_EVENT_VFORK:
-                    case PTRACE_EVENT_CLONE:
+                    case PTRACE_EVENT_VFORK: // 2
                         unsigned long cpid;
                         XFAIL(ptrace(PTRACE_GETEVENTMSG, pid, NULL, &cpid) == -1, "ptrace(%d): %s\n", pid, strerror(errno));
-                        DEBUGF("FORK to cpid=%lu\n", cpid);
+                        DEBUGF(CDY("FORK ")CY("%d")CDY(" to cpid=")CY("%lu\n"), pid, cpid);
                         waitpid(cpid, NULL, 0);
                         ptsetoptions(cpid);
                         XFAIL(ptrace(PTRACE_CONT, cpid, NULL, NULL) == -1, "ptrace(%lu): %s\n", cpid, strerror(errno));
@@ -416,21 +427,26 @@ ptrace_until_execve(pid_t *pidp, struct user_regs_struct *regsp, int *status) {
                     case PTRACE_EVENT_EXEC:  // 4
                         // Catch execve() after returning from syscall.
                         ptrace(PTRACE_SYSCALL, pid, NULL, NULL);
-                        pid = 0;
+                        pid = 0; // loop not call PTRACE_CONT
                         break;
                 }
                 continue;
             }
 
+            // SIGSTOP may arrive _before_ we receive the fork() event (above).
+            // [DEBUG zapper.c:437] Stray SIGSTOP for (untracked?) pid=34171
+            // [DEBUG zapper.c:412] Event for 34166 (event=1)
+            // [DEBUG zapper.c:422] FORK 34166 to cpid=34171
+            if (signum == SIGSTOP) {
+                DEBUGF(CR("Stray SIGSTOP for (untracked?) pid=%d (status=%d)\n"), pid, *status);
+                continue;
+            }
             // Forward signal to offending process.
             ptrace(PTRACE_GETSIGINFO, pid, NULL, &sigi);
-            DEBUGF("SIG-%d to pid %d [%d, %d, %d]\n", signum, pid, sigi.si_signo, sigi.si_code, sigi.si_errno);
-            // data = (void *)(int)signum;
+            DEBUGF("Forwarding "CDY("SIG_%d")" to pid "CY("%d")" [%d, %d, %d]\n", signum, pid, sigi.si_signo, sigi.si_code, sigi.si_errno);
             data = (void *)((long)signum);
             continue;
         }
-
-        // DEBUGF("status=%d (sig=%d %d)\n", *status, signum, signum & ~0x80);
 
         XFAIL(ptrace(PTRACE_GET_SYSCALL_INFO, pid, sizeof si, &si) <= 0, "ptrace(): %s\n", strerror(errno));
         if (ptrace(PTRACE_GETREGS, pid, NULL, regsp) != 0)
@@ -438,7 +454,7 @@ ptrace_until_execve(pid_t *pidp, struct user_regs_struct *regsp, int *status) {
         if (OAX(*regsp) != SYS_execve)
             ERREXIT(255, "Not SYS_execve()\n"); // CAN NOT HAPPEN. We only trap execve().
 
-        DEBUGF("pid=%d OP #%d %d-%d system\n", pid, si.op, (*status >> 8) & ~0x80, *status & 0xff);
+        DEBUGF("pid="CY("%d")CDY(" OP #%d")" %d-%d\n", pid, si.op, (*status >> 8) & ~0x80, *status & 0xff);
         if (si.op != PTRACE_EVENTMSG_SYSCALL_EXIT)
             continue;
         DEBUGF(" RET=%lld\n", si.exit.rval);
@@ -570,6 +586,17 @@ fix_stack(pid_t pid, struct user_regs_struct *regsp)
     DEBUGF("argc     = %lx\n", stackp[0]);
     DEBUGF("&argv[0] = %lx\n", stackp[1]);
     DEBUGF("argv[0]  = "CDR("%s")"\n",  &stack[stackp[1] - SP(*regsp)]);
+#ifdef DEBUG
+    idx = 0;
+    fprintf(stderr, "ARGS=");
+    while ((void *)stackp[idx + 1] != NULL) {
+        // DEBUGF("%lx\n", stackp[idx +1 ]);
+        fprintf(stderr, "'%s' ", &stack[stackp[idx + 1] - SP(*regsp)]);
+        idx++;
+    }
+    fprintf(stderr, "\n");
+    // DEBUGF("argv[0]  = "CDR("%s")"\n",  &stack[stackp[1] - SP(*regsp)]);
+#endif
 
     // Fing the length of all command line parameters
     size_t len = 0;
