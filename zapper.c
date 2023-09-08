@@ -1,7 +1,7 @@
 /*
  * https://www.thc.org
  *
- * Destroy all arguments and environment (/proc/<PID>/environ) and make the process
+ * Destroy all options and environment (/proc/<PID>/environ) and make the process
  * appear as a different process in the process list (ps -eF f).
  *
  * This tool does _NOT_ use LD_PRELOAD but ptrace() instead, allowing its
@@ -13,9 +13,9 @@
  * Compile:
  *     gcc -o zapper zapper.c
  *
- * Hide arguments:
+ * Hide options:
  *     ./zapper nmap -sS 192.168.0.0/24
- * Hide arguments and rename process 'nmap' to 'blah':
+ * Hide options and rename process 'nmap' to 'blah':
  *     ./zapper -a blah nmap -sS 192.168.0.0/24
  *
  * exec ./zapper -f -a BlahBlub bash -il
@@ -162,16 +162,16 @@ set_proxy_signals(void) {
 static void
 usage(void) {
     printf("\
-Hide command line arguments and clear the environment of a command.\n\
+Hide command options and clear the environment of a command.\n\
 \n\
 ./zapper [-fE] [-a name] command ...\n\
   -a <name>  Rename the process to 'name'\n\
   -f         zap all child processes as well (follow)\n\
   -E         Do not zap the environment\n\
 \n\
-Example - Start ssh but zap all arguments\n\
+Example - Start ssh but zap all options\n\
     $ "CC("./zapper")" "CM("ssh")CDM(" root@myserver.com")"\n\
-Example - Start 'nmap', zap all arguments & make nmap appear as 'harmless':\n\
+Example - Start 'nmap', zap all options & make nmap appear as 'harmless':\n\
     $ "CC("./zapper")CDC(" -a harmless ")CM("nmap")CDM(" -sCV -F -Pn scanme.nmap.org")"\n\
 Example - Hide current shell and all child processes:\n\
     $ "CC("exec ./zapper")CDC(" -f -a harmless ")CM("${SHELL:-bash}")CDM(" -il")"\n\
