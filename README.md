@@ -1,8 +1,16 @@
-# Zap all arguments from the process list
+# Make the command options disappear from the process list
 
-1. Works on static binaries as well (e.g. GoLang)
-2. Does not rely on *LD_PRELOAD=*
+```sh
+# Example to hide namp's command options:
+$ ./zapper nmap -sCV -F -Pn scanme.nmap.org
+# This will only show "nmap" without any command options in the ps-list.
+```
+
+1. Does not rely on *LD_PRELOAD=*
+2. Works also on static binaries (e.g. GoLang)
 3. Zaps the environment (*/proc/<pid>/environ*) as well
+4. Does not require *root*
+5. Only 00.1% overhead.
 
 
 Compile:
