@@ -1,4 +1,4 @@
-# Make the command options disappear from the process list
+# Zap the command options from the process list
 
 ```sh
 # Example to hide namp's command options:
