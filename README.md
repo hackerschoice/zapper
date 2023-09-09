@@ -8,7 +8,7 @@ $ ./zapper nmap -sCV -F -Pn scanme.nmap.org
 
 1. Does not rely on *LD_PRELOAD=*
 2. Works also on static binaries (e.g. GoLang)
-3. Zaps the environment (*/proc/<pid>/environ*) as well
+3. Zaps the environment (*/proc/&lt;PID&gt;/environ*) as well
 4. Does not require *root*
 5. Only 00.1% overhead.
 
