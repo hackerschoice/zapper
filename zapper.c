@@ -358,6 +358,7 @@ ptrace_until_execve(pid_t *pidp, struct user_regs_struct *regsp, int *status) {
     siginfo_t sigi;
     pid_t pid = *pidp;
     void *data = NULL;
+    unsigned long cpid;
 
     *status = 0;
     // Continue until execve().
@@ -406,7 +407,6 @@ ptrace_until_execve(pid_t *pidp, struct user_regs_struct *regsp, int *status) {
                     case PTRACE_EVENT_FORK:  // 1
                     case PTRACE_EVENT_VFORK:
                     case PTRACE_EVENT_CLONE:
-                        unsigned long cpid;
                         XFAIL(ptrace(PTRACE_GETEVENTMSG, pid, NULL, &cpid) == -1, "ptrace(%d): %s\n", pid, strerror(errno));
                         DEBUGF("FORK to cpid=%lu\n", cpid);
                         waitpid(cpid, NULL, 0);
