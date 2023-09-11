@@ -23,7 +23,7 @@
 
 // TODO:
 // * Follow (-f) from a separate process. At the moment, zapper starts first
-//     and is the parent that forks all tracees as child processes.
+//     and is the parent to all tracees (like strace does).
 //     ptrace_scope > 0 prevents the tracer (zapper) to be a separate process
 //     that is not a parent of the tracees.
 //     We could set prctl(, PR_SET_PTRACER_ANY) in zapper before execve() of the
@@ -40,6 +40,8 @@
 //   Needs trampoline program to also do this for all childs.
 // * Periodically rename argv[0]
 // * pick argv[0] at random
+// * PPID=1: Make all tracee's PPID's to be 1 and proxy the SIGCHLD to correct
+//   pid: Double-fork via trampoline app.
 
 #include <sys/ptrace.h>
 #include <sys/types.h>
@@ -77,30 +79,39 @@ static union u {
 } data;
 
 // ANSI color codes.
-#define CDR(a)        "\033[0;31m"a"\033[0m"
-#define CDG(a)        "\033[0;32m"a"\033[0m"
-#define CDY(a)        "\033[0;33m"a"\033[0m"
-#define CDB(a)        "\033[0;34m"a"\033[0m"
-#define CDM(a)        "\033[0;35m"a"\033[0m"
-#define CDC(a)        "\033[0;36m"a"\033[0m"
-#define CR(a)         "\033[1;31m"a"\033[0m"
-#define CG(a)         "\033[1;32m"a"\033[0m"
-#define CY(a)         "\033[1;33m"a"\033[0m"
-#define CM(a)         "\033[1;35m"a"\033[0m"
-#define CC(a)         "\033[1;36m"a"\033[0m"
-#define CW(a)         "\033[1;37m"a"\033[0m"
+#define CDR        "\033[0;31m"
+#define CDG        "\033[0;32m"
+#define CDY        "\033[0;33m"
+#define CDB        "\033[0;34m"
+#define CDM        "\033[0;35m"
+#define CDC        "\033[0;36m"
+#define CR         "\033[1;31m"
+#define CG         "\033[1;32m"
+#define CY         "\033[1;33m"
+#define CN         "\033[0m"
+#define CB         "\033[1;34m"
+#define CM         "\033[1;35m"
+#define CC         "\033[1;36m"
+#define CW         "\033[1;37m"
 #define ERREXIT(code, a...) do{fprintf(stderr, a); exit(code);}while(0)
-#define XFAIL(expr, a...) do { \
+#define XFAIL(expr, fmt, ...) do { \
         if (expr) { \
-                fprintf(stderr, "%s:%d:%s() ASSERT(%s): ", __FILE__, __LINE__, __func__, #expr); \
-                fprintf(stderr, a); \
+                fprintf(stderr, "%s:%d:%s() ASSERT(%s): " fmt, __FILE__, __LINE__, __func__, #expr, ##__VA_ARGS__); \
                 exit(255); \
         } \
 } while (0)
 #ifdef DEBUG
-# define DEBUGF(a...) do{fprintf(stderr, "[DEBUG %s:%d] ", __FILE__, __LINE__); fprintf(stderr, a);}while(0)
+# define DEBUGF(fmt, ...) do{fprintf(stderr, "[DEBUG %s:%d] " fmt, __FILE__, __LINE__, ##__VA_ARGS__);}while(0)
 #else
-# define DEBUGF(a...)
+# define DEBUGF(fmt, ...)
+#endif
+
+#ifndef MAX
+# define MAX(X, Y) (((X) < (Y)) ? (Y) : (X))
+#endif
+
+#ifndef MIN
+# define MIN(X, Y) (((X) < (Y)) ? (X) : (Y))
 #endif
 
 #define GOTOERR(a...) do { \
@@ -119,15 +130,18 @@ pid_t g_pid_zapper;
 #define IS_TRACER_IS_PARENT       (0x08)
 #define FL_ZAP_ENV                (0x10)
 #define IS_SIGNAL_PROXY           (0x20)
+#define FL_PRGNAME                (0x40)
 
 static void
 dumpfile(const char *file, void *data, size_t n)
 {
+#ifdef DEBUG
     FILE *fp;
 
     fp = fopen(file, "wb");
     fwrite(data, n, 1, fp);
     fclose(fp);
+#endif
 }
 
 static void
@@ -162,21 +176,20 @@ set_proxy_signals(void) {
 static void
 usage(void) {
     printf("\
-Hide command options and clear the environment of a command.\n\
+"CG"Hide command options and clear the environment of a command."CN"\n\
 \n\
-./zapper [-fE] [-a name] command ...\n\
-  -a <name>  Rename the process to 'name'\n\
-  -f         zap all child processes as well (follow)\n\
-  -E         Do not zap the environment\n\
+./zapper [-f] [-a name] command ...\n\
+  -a <name>  Rename the process to 'name'. (Use -a \"\" for none).\n\
+  -f         zap all child processes as well (follow).\n\
 \n\
-Example - Start ssh but zap all options\n\
-    $ "CC("./zapper")" "CM("ssh")CDM(" root@myserver.com")"\n\
+Example - Start ssh but zap all options (only 'ssh' appears)\n\
+    $ "CC"./zapper "CM"ssh"CDM" root@myserver.com"CN"\n\
 Example - Start 'nmap', zap all options & make nmap appear as 'harmless':\n\
-    $ "CC("./zapper")CDC(" -a harmless ")CM("nmap")CDM(" -sCV -F -Pn scanme.nmap.org")"\n\
+    $ "CC"./zapper "CDC"-a harmless "CM"nmap"CDM" -sCV -F -Pn scanme.nmap.org"CN"\n\
 Example - Hide current shell and all child processes:\n\
-    $ "CC("exec ./zapper")CDC(" -f -a harmless ")CM("${SHELL:-bash}")CDM(" -il")"\n\
+    $ "CC"exec ./zapper"CDC" -f -a \"\" "CM"bash"CDM" -il"CN"\n\
 \n\
-"CDY("Join us on Telegram: ")CW("https://t.me/thcorg")"\n\
+"CDY"Join us on Telegram: "CW"https://t.me/thcorg"CN"\n\
 ");
 
     exit(0);
@@ -197,10 +210,14 @@ do_getopts(int argc, char *argv[])
                 g_flags &= ~FL_ZAP_ENV;
                 break;
             case 'a':
-                g_prg_name = strdup(optarg);
+                // ps shows '?' if name is empty. Help user and default to " ".
+                if (*optarg == '\0')
+                    g_prg_name = " ";
+                else
+                    g_prg_name = strdup(optarg);
+                g_flags |= FL_PRGNAME;
                 break;
             case 'f':
-                // 
                 g_flags |= (FL_FOLLOW | FL_STAY_ATTACHED | FL_FORCE_TRACER_IS_PARENT);
                 break;
             case 'c':
@@ -215,22 +232,23 @@ do_getopts(int argc, char *argv[])
 
     if (argv[optind] == NULL)
         usage();
-    if (g_prg_name == NULL)
-        g_prg_name = argv[optind];
 
-    if (strcmp(argv[0], g_prg_name) != 0) {
-        // argv[0] is still 'zapper'. Execute ourself to fake our own argv[0]
-        argv[0] = g_prg_name;
-        snprintf(buf, sizeof buf, "/proc/%d/exe", getpid());
-        realpath(buf, dst);
-        // DEBUGF("executing myself as %s: %s\n", argv[0], dst);
-        execv(dst, argv);
+    if (g_flags & FL_PRGNAME) {
+        if (strcmp(argv[0], g_prg_name) != 0) {
+            // argv[0] is still 'zapper'. Execute ourself to fake our own argv[0]
+            argv[0] = g_prg_name;
+            snprintf(buf, sizeof buf, "/proc/%d/exe", getpid());
+            realpath(buf, dst);
+            // DEBUGF("executing myself as %s: %s\n", argv[0], dst);
+            execv(dst, argv);
+        }
+        // FIXME: Modify my own AT_EXECFN at the very bottom of my stack.
     }
 
     return optind;
 }
 
-static long long
+static unsigned long
 get_stack_end(pid_t pid)
 {
     char buf[16* 1024];
@@ -300,13 +318,14 @@ ptpokecpy(pid_t pid, void *dst, void *src, size_t n)
     ptrace(PTRACE_POKEDATA, pid, dst, data.val);
 }
 
-static void
+static int
 ptsetoptions(pid_t pid) {
     // execve() delivers an extra TRAP, ignore it:
     // https://manpages.debian.org/bookworm/manpages-dev/ptrace.2.en.html
-
     // XFAIL(ptrace(PTRACE_SETOPTIONS, pid, NULL, PTRACE_O_TRACESYSGOOD | PTRACE_O_EXITKILL | PTRACE_O_TRACEFORK | PTRACE_O_TRACEVFORK | PTRACE_O_TRACECLONE | PTRACE_O_TRACEEXEC) != 0, "ptrace %s\n", strerror(errno));
-    XFAIL(ptrace(PTRACE_SETOPTIONS, pid, NULL, PTRACE_O_TRACESYSGOOD | PTRACE_O_EXITKILL | PTRACE_O_TRACEFORK | PTRACE_O_TRACEVFORK | PTRACE_O_TRACEEXEC) != 0, "ptrace %s\n", strerror(errno));
+    // XFAIL(ptrace(PTRACE_SETOPTIONS, pid, NULL, PTRACE_O_TRACESYSGOOD | PTRACE_O_EXITKILL | PTRACE_O_TRACEFORK | PTRACE_O_TRACEVFORK | PTRACE_O_TRACEEXEC) != 0, "ptrace(%d) %s\n", pid, strerror(errno));
+    // XFAIL(ptrace(PTRACE_SETOPTIONS, pid, NULL, PTRACE_O_TRACESYSGOOD | PTRACE_O_EXITKILL | PTRACE_O_TRACEEXIT | PTRACE_O_TRACEFORK | PTRACE_O_TRACEVFORK | PTRACE_O_TRACEEXEC) != 0, "ptrace(%d) %s\n", pid, strerror(errno));
+    return ptrace(PTRACE_SETOPTIONS, pid, NULL, PTRACE_O_TRACESYSGOOD | PTRACE_O_EXITKILL | PTRACE_O_TRACEFORK | PTRACE_O_TRACEVFORK | PTRACE_O_TRACEEXEC);
 }
 
 static pid_t
@@ -322,9 +341,9 @@ start_trace_child(const char *orig_prog, char *new_argv[]) {
 
         // Emulate shell's exit string.
         str = getenv("SHELL");
-        if (str != NULL) {
+        if (str) {
             str = strrchr(str, '/');
-            if ((str != NULL) && (*str != '\0'))
+            if ((str) && (*str != '\0'))
                 str++;
         }
 
@@ -340,7 +359,7 @@ start_trace_child(const char *orig_prog, char *new_argv[]) {
     if (WIFEXITED(status))
         exit(WEXITSTATUS(status));
 
-    ptsetoptions(g_pid);
+    XFAIL(ptsetoptions(g_pid) != 0, "ptrace(%d): %s\n", g_pid, strerror(errno));
     set_proxy_signals();
 
     g_flags |= IS_TRACER_IS_PARENT;
@@ -374,7 +393,7 @@ ptrace_until_execve(pid_t *pidp, struct user_regs_struct *regsp, int *status) {
             GOTOERR("waitpid()=%d: %s\n", pid, strerror(errno));
         *pidp = pid;
         if (WIFEXITED(*status)) {
-            DEBUGF("pid="CY("%d")" "CG("exited")".\n", pid);
+            DEBUGF("pid="CY"%d "CG"exited"CN".\n", pid);
             if (pid == g_pid_master)
                 exit(WEXITSTATUS(*status)); // tracee exited. Exit with same error code.
             pid = 0;
@@ -383,14 +402,14 @@ ptrace_until_execve(pid_t *pidp, struct user_regs_struct *regsp, int *status) {
         if (WIFSIGNALED(*status)) {
             // Tracee was termianted with a signal
             signum = WTERMSIG(*status);
-            DEBUGF(CY("%d ")CDY("terminated")" by SIG-%d\n", pid, signum);
+            DEBUGF(CY"%d "CDY"terminated"CN" by SIG-%d\n", pid, signum);
             if (pid == g_pid_master) {
                 if (signum == SIGSEGV)
                     exit(128 + signum); // Do not generate core dump of zapper.
                 // Tracer to commit suicide with same signal as tracee died.
                 if (g_flags & IS_SIGNAL_PROXY)
                     signal(signum, SIG_DFL);
-                DEBUGF(CR("SUICIDE\n"));
+                DEBUGF(CR"SUICIDE\n"CN);
                 kill(getpid(), signum);
             }
             pid = 0;
@@ -409,19 +428,27 @@ ptrace_until_execve(pid_t *pidp, struct user_regs_struct *regsp, int *status) {
         if (! (signum & 0x80)) {
             // Signal was for TRACEE (not tracer)
             if (signum == SIGTRAP) {
-                DEBUGF("Event for "CY("%d")" ("CDG("event=%d")")\n", pid, (*status >> 16) & 0xffff);
+                DEBUGF("Event for "CY"%d"CN" ("CDG"event=%d"CN")\n", pid, (*status >> 16) & 0xffff);
                 // NOTE: Stop occures in parent, not the newly created thread.
                 switch ((*status >> 16) & 0xffff) {
                     case PTRACE_EVENT_CLONE: // 3
                         DEBUGF(CDR("CLONE()")" not implemented\n");
                         break;
+                    case PTRACE_EVENT_EXIT: // 6
+                        // EVENT_EXIT for the child may trigger before EVENT_FORK at the parent.
+                        // See below Note #3
+                        break;
                     case PTRACE_EVENT_FORK:  // 1
                     case PTRACE_EVENT_VFORK: // 2
                         unsigned long cpid;
                         XFAIL(ptrace(PTRACE_GETEVENTMSG, pid, NULL, &cpid) == -1, "ptrace(%d): %s\n", pid, strerror(errno));
-                        DEBUGF(CDY("FORK ")CY("%d")CDY(" to cpid=")CY("%lu\n"), pid, cpid);
+                        DEBUGF(CDY"FORK "CY"%d"CDY" to cpid="CY"%lu\n"CN, pid, cpid);
                         waitpid(cpid, NULL, 0);
-                        ptsetoptions(cpid);
+                        // Note #3: cpid may have already exited (and before we received its EVENT_EXIT).
+                        // The only thing we can hope for is trying to call ptsetoptions() and dont
+                        // fail hard if ptsetoptions() fails (e.g. when client has already exited).
+                        if (ptsetoptions(cpid) != 0)
+                            break;  // Child has already exited.
                         XFAIL(ptrace(PTRACE_CONT, cpid, NULL, NULL) == -1, "ptrace(%lu): %s\n", cpid, strerror(errno));
                         break;
                     case PTRACE_EVENT_EXEC:  // 4
@@ -434,16 +461,31 @@ ptrace_until_execve(pid_t *pidp, struct user_regs_struct *regsp, int *status) {
             }
 
             // SIGSTOP may arrive _before_ we receive the fork() event (above).
-            // [DEBUG zapper.c:437] Stray SIGSTOP for (untracked?) pid=34171
-            // [DEBUG zapper.c:412] Event for 34166 (event=1)
-            // [DEBUG zapper.c:422] FORK 34166 to cpid=34171
+            // [DEBUG zapper.c:455] Stray SIGSTOP for (untracked?) pid=42056 (status=4991)
+            // [DEBUG zapper.c:426] Event for 42054 (event=1)
+            // [DEBUG zapper.c:436] FORK 42054 to cpid=42056
             if (signum == SIGSTOP) {
-                DEBUGF(CR("Stray SIGSTOP for (untracked?) pid=%d (status=%d)\n"), pid, *status);
+                // FIXME: compile cmatrix triggers this that it must be forwarded.
+                // FIXME: ./zapper -f -a "" bash -il -> zsh -il triggers this that it must
+                // not be forwarded (clone?)
+                DEBUGF(CR"Stray SIGSTOP for (untracked?) pid=%d (status=%d)\n"CN, pid, *status);
                 continue;
             }
+
             // Forward signal to offending process.
             ptrace(PTRACE_GETSIGINFO, pid, NULL, &sigi);
-            DEBUGF("Forwarding "CDY("SIG_%d")" to pid "CY("%d")" [%d, %d, %d]\n", signum, pid, sigi.si_signo, sigi.si_code, sigi.si_errno);
+            // Do not forward SIGCHLD to report when child has stopped (by trap).
+            if (signum == SIGCHLD) {
+                switch (sigi.si_code) {
+                    case CLD_DUMPED:
+                    case CLD_TRAPPED:
+                    case CLD_STOPPED:
+                    case CLD_CONTINUED:
+                        DEBUGF("NOT forwarding signal [%d, %d, %d]\n", sigi.si_signo, sigi.si_code, sigi.si_errno);
+                        continue;
+                }
+            }
+            DEBUGF("Forwarding "CDY"SIG_%d"CN" to pid "CY"%d"CN" [%d, %d, %d]\n", signum, pid, sigi.si_signo, sigi.si_code, sigi.si_errno);
             data = (void *)((long)signum);
             continue;
         }
@@ -454,7 +496,7 @@ ptrace_until_execve(pid_t *pidp, struct user_regs_struct *regsp, int *status) {
         if (OAX(*regsp) != SYS_execve)
             ERREXIT(255, "Not SYS_execve()\n"); // CAN NOT HAPPEN. We only trap execve().
 
-        DEBUGF("pid="CY("%d")CDY(" OP #%d")" %d-%d\n", pid, si.op, (*status >> 8) & ~0x80, *status & 0xff);
+        DEBUGF("pid="CY"%d"CDY" OP #%d"CN" %d-%d\n", pid, si.op, (*status >> 8) & ~0x80, *status & 0xff);
         if (si.op != PTRACE_EVENTMSG_SYSCALL_EXIT)
             continue;
         DEBUGF(" RET=%lld\n", si.exit.rval);
@@ -480,7 +522,6 @@ start_trace_parent(const char *orig_prog, char *new_argv[], struct user_regs_str
     // Try ZAPPER to be the CHILD (tracer) and trace the PARENT (tracee)
     // See ptrace_scope
     // https://www.kernel.org/doc/Documentation/security/Yama.txt
-
     int up[2];
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, up) != 0)
         goto err;
@@ -536,7 +577,7 @@ start_trace_parent(const char *orig_prog, char *new_argv[], struct user_regs_str
     if (waitpid(pid_tracee, &ret, 0) == -1)
         GOTOERR("waitpid(%d): %s\n", pid_tracee, strerror(errno));
 
-    ptsetoptions(pid_tracee);
+    XFAIL(ptsetoptions(pid_tracee) != 0, "ptrace(%d): %s\n", pid_tracee, strerror(errno));
 
     // Tell TRACEE that we are attached and TRACEE can call execve().
     if (write(up[0], &ret, sizeof ret) != sizeof ret)
@@ -564,28 +605,31 @@ fix_stack(pid_t pid, struct user_regs_struct *regsp)
     unsigned long *stackp;
     unsigned long *stack_envp;
     unsigned long *valp;
-    void *stack_sparep = NULL;  // randomized .stack
-    size_t stack_spare_sz = 0;
-    long long stack_end;
+    unsigned long spare_ofs = 0;
+    unsigned long argv0_ofs = 0;
+    unsigned long stack_end;
     int elft_idx;
     int idx;
-    int n;
 
     stack_end = get_stack_end(pid);
-    // XFAIL(ptrace(PTRACE_GETREGS, pid, NULL, regsp) != 0, "ptrace(%d): %s\n", pid, strerror(errno));
-
-    DEBUGF("=> SP 0x%llx-0x%llx (%llu)\n", SP(*regsp), stack_end, stack_end - SP(*regsp));
-
     stack_sz = stack_end - SP(*regsp);
+    DEBUGF("=> SP 0x%lx-0x%lx (stack_sz=%zu)\n", (unsigned long)SP(*regsp), stack_end, stack_sz);
+
     stack = calloc(1, stack_sz);
     XFAIL(stack == NULL, "calloc(): %s\n", strerror(errno));
     stackp = (unsigned long *)stack;
     ptpeekcpy(stack, pid, (void *)SP(*regsp), stack_sz);
 
-    dumpfile("stack.dat", stack, stack_end - SP(*regsp));
+    dumpfile("stack.dat", stack, stack_sz);
     DEBUGF("argc     = %lx\n", stackp[0]);
     DEBUGF("&argv[0] = %lx\n", stackp[1]);
-    DEBUGF("argv[0]  = "CDR("%s")"\n",  &stack[stackp[1] - SP(*regsp)]);
+    char *str = &stack[stackp[1] - SP(*regsp)];
+    DEBUGF("argv[0]  = '"CDR("%s")"'\n",  str);
+    // Make argv0 smaller (See Note #2)
+    char *end = str + strlen(str);
+    while ((end-- > str) && (*end == ' ')) 
+            *end = '\0';
+    DEBUGF("argv[0]  = '"CDR("%s")"'\n",  str);
 #ifdef DEBUG
     idx = 0;
     fprintf(stderr, "ARGS=");
@@ -595,63 +639,90 @@ fix_stack(pid_t pid, struct user_regs_struct *regsp)
         idx++;
     }
     fprintf(stderr, "\n");
-    // DEBUGF("argv[0]  = "CDR("%s")"\n",  &stack[stackp[1] - SP(*regsp)]);
 #endif
 
-    // Fing the length of all command line parameters
+    // Find lowest address (which normally is ARGV[0] but dont have to be).
     size_t len = 0;
     valp = &stackp[1];
-    while (*valp != 0) {
-        idx = *valp - SP(*regsp);
-        len += strlen(&stack[idx]);
-        len++; // \0
-        valp++;
+    argv0_ofs = stackp[1] - SP(*regsp);
+    unsigned long amin = stack_end;
+    unsigned long amax = SP(*regsp);
+    for (; *valp != 0x00 /* NULL */; valp++) {
+        amin = MIN(amin, *valp);
+        amax = MAX(amax, *valp);
     }
     valp++; // Skip NULL
-    DEBUGF("Total Length of all command line args: %zu bytes\n", len);
 
     // Skip through envp and find start of elf-table
     stack_envp = valp;
-    while (*valp != 0) {
-        if (g_flags & FL_ZAP_ENV) {
-            idx = *valp - SP(*regsp);
-            len += strlen(&stack[idx]);
-            len++; // \0
-        }
-        valp++;
+    unsigned long emin = stack_end;
+    unsigned long emax = SP(*regsp);
+    for (; *valp != 0x00 /* NULL */; valp++) {
+        emin = MIN(emin, *valp);
+        emax = MAX(emax, *valp);
     }
-    valp++; // Skip 0x00
+    amin = MIN(amin, emin);
+    amax = MAX(amax, emax);
+    amax += strlen(&stack[amax - SP(*regsp)]) + 1;
+    valp++; // Skip NULL
 
+    DEBUGF("ARG/ENV is from +%lu to +%llu (%lu bytes)\n", amin - (unsigned long)SP(*regsp), amax - SP(*regsp), amax - amin);
+    // valp now points to start of ELF Table.
     DEBUGF("stackp 0x%lx valp 0x%lx\n", (unsigned long)stackp, (unsigned long)valp);
-    elft_idx = valp - stackp;
-    DEBUGF("Elf Table start at idx=%d (+0x%lx)\n", elft_idx, elft_idx * sizeof (void *));
+    elft_idx = valp - stackp; // this is INDEX, not offset.
+    DEBUGF("Elf Table start at idx=%d (ofs=%lu)\n", elft_idx, elft_idx * sizeof (void *));
 
-    // Align to 16 bytes boundary
-    if (len != (len & ~15))
-        len = (len + 16) & ~15;
+    unsigned long ofs;
+    // Find where Randomized Stack area starts and how long it is:
+    for (idx = elft_idx; stackp[idx] != 0; idx += 2) {
+        // After ELF-Table there is 0x00 + 16 bytes random + "x86_64\0"
+        // The specs dont define which comes first so we need to check and
+        // find the largest to determine where the randomized stack starts.
+        if (stackp[idx] == 0x0f) {
+            // pointer to AT_PLATFORM string.
+            ofs = stackp[idx + 1] - SP(*regsp);
+            ofs += strlen(&stack[ofs]) + 1;
+            if (ofs > spare_ofs)
+                spare_ofs = ofs;
+        }
+        if (stackp[idx] == 0x19) {
+            // pointer to AT_RANDOM (16 bytes).
+            ofs = stackp[idx + 1] - SP(*regsp) + 16;
+            if (ofs > spare_ofs)
+                spare_ofs = ofs;
+        }
+    }
+    // size_t elft_sz = (idx - elft_idx + 2) * sizeof (void *);
+    // DEBUGF("ELF Table size=%zd\n", elft_sz);
+
+    // Stack randomization gives us some free space
+    // size_t spare_sz = (amin - SP(*regsp)) -  spare_ofs;
+    // DEBUGF("Spare stack space: 0x%lx@+%zd (spare_sz=%zd)\n", SP(*regsp) + spare_ofs, spare_ofs, spare_sz);
+
+    // Calculate the gap that should be added
+    // so that entire stack is still 16 bytes aligned.
+    len = (amax - amin);
+    unsigned long sz = stack_sz + len;
+    if (sz != (sz & ~15))
+        sz = (sz + 16) & ~15;
+
+    len = sz - stack_sz;
     DEBUGF("Creating a gap of %zu bytes\n", len);
 
-    // The size we are interested in is all data between SP
-    // and the argv-strings + extra space to duplicate the argv-strings
-    // => Make a copy and make it 'len' longer.
-    stack_sz = stackp[1] - SP(*regsp) + len + len;
-    stack = realloc(stack, stack_sz);
+    // FIXME: we could use spare space here, if available.
+    stack = realloc(stack, stack_sz + len);
+    // Copy everything down to where kernel's pointers point to.
+    memcpy(stack + stack_sz, stack + stack_sz - len, len);
     stackp = (unsigned long *)stack;
+    stack_sz += len;
 
     // Adjust the elf table that we moved to a lower address by len.
-    n = 0;
-    while (1)
-    {
-        idx = elft_idx + n * 2;
-        if (stackp[idx] == 0)
-            break;
-        n++;
+    // Find the start of the randomized (spare_ofs).
+    for (idx = elft_idx; stackp[idx] != 0; idx += 2) {
         // See https://elixir.bootlin.com/linux/v5.19.17/source/include/uapi/linux/auxvec.h
         switch (stackp[idx]) {
             case 0x19:  // AT_RANDOM
-                stack_sparep = (void *)stackp[idx + 1] + 16;
             case 0x1f:  // AT_EXECFN, static=outside, dynamic=inside
-                // DEBUGF("0x1f %s\n", &stack[stackp[idx + 1] - SP(regs)]);
             case 0x21:  // ptr to "\177ELF\002\001\001\000", normally outside stack region.
             case 0x0f:  // AT_PLATFORM
             case 0x18:  // AT_BASE_PLATFORM
@@ -667,35 +738,39 @@ fix_stack(pid_t pid, struct user_regs_struct *regsp)
         }
     }
 
-    // Stack randomization gives us some free space (zapper currently does not use this).
-    if (stack_sparep != NULL)
-        stack_spare_sz = stackp[1] - (long unsigned int)stack_sparep;
-    DEBUGF("Spare stack space: %zu 0x%p-0x%p\n", stack_spare_sz, stack_sparep, (void *)stackp[1]);
-
     // Adjust address off all argv-pointers
     int i = 1;  // i = 0 is ARGC
     while (stackp[i] != 0)
         stackp[i++] -= len;
+    // ZAP argv
+    memset(&stack[(unsigned long)amin - SP(*regsp) + len], 0, amax - amin);
 
     if (g_flags & FL_ZAP_ENV) {
         i = 0;
         while (stack_envp[i] != 0)
             stack_envp[i++] -= len;
+        // ZAP env
+        memset(&stack[(unsigned long)emin - SP(*regsp) + len], 0, emax - emin);
     }
 
-    i = 1;
-    idx = stack_sz - len;
-    // Delete all argv-strings that the kernel references
-    memset(&stack[stack_sz - len], 0, len);
-    // Copy the program's name to argv[0] that the kernel references
-    memcpy(&stack[idx], g_prg_name, strlen(g_prg_name));
-    // write the new stack
-    ptpokecpy(pid, (void *)(SP(*regsp) - len), stack, stack_sz);
-    free(stack);
+    // Copy g_prg_name (-a name) to argv[0] (whom's location the kernel
+    // references). This may overlap into ENV if g_prg_name is longer
+    // than the original argv[*] but only when it's the tracee's tracee
+    // (a grand-tracee of the tracer). See also Note #2.
+    size_t max_sz = MIN(amax, emax) - MIN(amin, emin);
+    size_t prglen = MIN(max_sz - 1, strlen(g_prg_name));
+    memcpy(&stack[argv0_ofs + len], g_prg_name, prglen);
+    stack[argv0_ofs + len + prglen] = '\0';
 
+    // dumpfile("stack2.dat", stack, stack_sz);
     // Increase the stack size (by decreasing the stack pointer).
     SP(*regsp) -= len;
+    DEBUGF("New stack 0x%llx-0x%lx (size=%llu == %zu)\n", SP(*regsp), stack_end, stack_end - SP(*regsp), stack_sz);
+
     ptrace(PTRACE_SETREGS, pid, NULL, regsp);
+
+    ptpokecpy(pid, (void *)SP(*regsp), stack, stack_sz);
+    free(stack);
 }
 
 static void
@@ -714,7 +789,25 @@ follow_forever(pid_t pid)
 static pid_t
 start_trace(const char *orig_prog, char *new_argv[], struct user_regs_struct *regsp) {
     pid_t pid;
+    char *orig_argv0 = new_argv[0];
+    char *enlarged_argv0 = NULL;
 
+    // Note #2: ADM reported a bug when under special conditions the -a name
+    // may leak into the environment:
+    // $ ./zapper  -a 12345678990abcdef cat
+    // $ xxd /proc/$(pidof 12345678990abcdef)/environ | head
+    // The solution is to make enough space for the tracer to put the fake
+    // -a name and remove the extra string later when tracing the execve().
+    size_t glen = strlen(g_prg_name);
+    size_t alen = strlen(new_argv[0]);
+    if (glen > alen) {
+        enlarged_argv0 = malloc(glen + 1);
+        enlarged_argv0[glen] = '\0';
+        memcpy(enlarged_argv0, new_argv[0], alen);
+        memset(enlarged_argv0 + alen, ' ', glen - alen);
+        DEBUGF("Enlarging argv[0] by %zu spaces to make space for longer -a name\n", glen - alen);
+        new_argv[0] = enlarged_argv0;
+    }
     if (!(g_flags & FL_FOLLOW)) {
         // Detach after zapping if we are a background process.
         if (fcntl(0, F_GETFD, 0) != 0) {
@@ -737,7 +830,8 @@ start_trace(const char *orig_prog, char *new_argv[], struct user_regs_struct *re
             goto done;  // We are now the CHILD.
         }
         DEBUGF("ERROR: TRACER failed to be the PARENT\n");
-        // FIXME: try with -c parameter
+        fprintf(stderr, "ERROR: Try with -c option\n");
+        exit(255);
     }
 
     // ### This PARENT is the TRACER and tracing the CHILD (TRACEE)
@@ -747,6 +841,11 @@ start_trace(const char *orig_prog, char *new_argv[], struct user_regs_struct *re
     DEBUGF("[%d] Tracing child %d\n", getpid(), pid);
     XFAIL(ptrace(PTRACE_GETREGS, pid, NULL, regsp) != 0, "ptrace(%d): %s\n", pid, strerror(errno));
 done:
+    if (enlarged_argv0) {
+        free(enlarged_argv0);
+        new_argv[0] = orig_argv0;
+        DEBUGF("restored to %p\n", new_argv[0]);
+    }
     return pid;
 }
 
@@ -771,8 +870,10 @@ main(int argc, char *argv[], char *envp[]) {
     }
 
     // Destroy my own argv
-    for (i = 1; i < argc; i++)
+    for (i = 1; i < argc; i++) {
+        DEBUGF("SelfZAP '%s' %zu\n", argv[1], strlen(argv[i]));
         memset(argv[i], 0, strlen(argv[i]));
+    }
 
     // Destroy my own envp    
     if (g_flags & FL_ZAP_ENV) {
@@ -788,7 +889,6 @@ main(int argc, char *argv[], char *envp[]) {
 
     ptrace(PTRACE_DETACH, pid, NULL, NULL);
 
-    // FIXME: Parent (tracer) needs to proxy all signals to child (tracee).
     // Wait for child to terminate
     waitpid(pid, &i, 0);
     if (WIFEXITED(i))
