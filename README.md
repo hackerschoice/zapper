@@ -1,6 +1,6 @@
-# Zap the command options from the process list
+<H2 align="center">Privacy for your command line options</H2>
 
-Download
+Download:
 ```sh
 curl -fL -o zapper https://da.gd/thczap/zapper-linux-x86_64 && \
 chmod 755 zapper && \
