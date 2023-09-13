@@ -213,7 +213,9 @@ Example - Start ssh but zap all options (only 'ssh' appears)\n\
 Example - Start 'nmap', zap all options & make nmap appear as 'harmless':\n\
     $ "CC"./zapper "CDC"-a harmless "CM"nmap"CDM" -sCV -F -Pn scanme.nmap.org"CN"\n\
 Example - Hide current shell and all child processes:\n\
-    $ "CC"exec ./zapper"CDC" -f -a \"\" "CM"bash"CDM" -il"CN"\n\
+    $ "CC"exec ./zapper"CDC" -f -a- "CM"bash"CDM" -il"CN"\n\
+Example - Hide current shell and all child processes as some kernel worker:\n\
+    $ "CC"exec ./zapper"CDC" -f -a[kworker/1:0-rcu_gp] "CM"bash"CDM" -il"CN"\n\
 \n\
 "CDY"Join us on Telegram: "CW"https://t.me/thcorg"CN"\n\
 ");
@@ -242,6 +244,8 @@ do_getopts(int argc, char *argv[])
             case 'a':
                 // ps shows '?' if name is empty. Help user and default to " ".
                 if (*optarg == '\0')
+                    g_cur_prg_name = " ";
+                else if ((optarg[0] == '-') && (optarg[1] == '\0'))
                     g_cur_prg_name = " ";
                 else
                     g_cur_prg_name = strdup(optarg);
@@ -276,7 +280,8 @@ do_getopts(int argc, char *argv[])
         // argv[0] is still 'zapper'. Execute ourself to fake our own argv[0]
         argv[0] = g_cur_prg_name;
         snprintf(buf, sizeof buf, "/proc/%d/exe", getpid());
-        realpath(buf, dst);
+        if (realpath(buf, dst))
+            ERREXIT(255, "realpath(%s): %s\n", buf, strerror(errno));
         execv(dst, argv);
     }
 

@@ -20,8 +20,10 @@ jobs:
 
       - name: Compile x86_64
         run: |
-          apk add --no-cache bash musl-dev linux-headers gcc make
-          gcc -Wall -static -o zapper-linux-x86_64 zapper.c
+          apk add --no-cache bash musl-dev linux-headers gcc make upx
+          gcc -Wall -O2 -static -o zapper-linux-x86_64 zapper.c
+          strip zapper-linux-x86_64
+          upx zapper-linux-x86_64
         shell: alpine.sh --root {0}
 
       # - name: Setup Alpine aarch64
