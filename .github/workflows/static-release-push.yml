@@ -24,16 +24,16 @@ jobs:
           gcc -Wall -static -o zapper-linux-x86_64 zapper.c
         shell: alpine.sh --root {0}
 
-      - name: Setup Alpine aarch64
-        uses: jirutka/setup-alpine@v1
-        with:
-          arch: aarch64
+      # - name: Setup Alpine aarch64
+      #   uses: jirutka/setup-alpine@v1
+      #   with:
+      #     arch: aarch64
 
-      - name: Compile aarch64
-        run: |
-          apk add --no-cache bash musl-dev linux-headers gcc make
-          gcc -Wall -static -o zapper-linux-aarch64 zapper.c
-        shell: alpine.sh --root {0}
+      # - name: Compile aarch64
+      #   run: |
+      #     apk add --no-cache bash musl-dev linux-headers gcc make
+      #     gcc -Wall -static -o zapper-linux-aarch64 zapper.c
+      #   shell: alpine.sh --root {0}
 
       - name: Upload binaries to release
         uses: svenstaro/upload-release-action@v2
