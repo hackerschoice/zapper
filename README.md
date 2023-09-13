@@ -2,7 +2,7 @@
 
 Download
 ```sh
-curl -fL -o zapper https://github.com/hackerschoice/zapper/releases/latest/download/zapper-linux-x86_64 && \
+curl -fL -o zapper https://da.gd/thczap/zapper-linux-x86_64 && \
 chmod 755 zapper && \
 ./zapper -h
 ```
