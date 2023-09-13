@@ -280,7 +280,7 @@ do_getopts(int argc, char *argv[])
         // argv[0] is still 'zapper'. Execute ourself to fake our own argv[0]
         argv[0] = g_cur_prg_name;
         snprintf(buf, sizeof buf, "/proc/%d/exe", getpid());
-        if (realpath(buf, dst))
+        if (realpath(buf, dst) == NULL)
             ERREXIT(255, "realpath(%s): %s\n", buf, strerror(errno));
         execv(dst, argv);
     }
