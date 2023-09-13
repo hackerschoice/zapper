@@ -1,0 +1,47 @@
+name: Static Post-Release Build
+# on: [push]
+# on:
+#   release:
+#     types: [published]
+on: [workflow_dispatch]
+
+permissions:
+  contents: write
+
+jobs:
+  Upload-Actions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      # https://github.com/marketplace/actions/setup-alpine-linux-environment
+      - name: Setup Alpine x86_64
+        uses: jirutka/setup-alpine@v1
+
+      - name: Compile x86_64
+        run: |
+          apk add --no-cache bash musl-dev linux-headers gcc make
+          gcc -Wall -static -o zapper-linux-x86_64 zapper.c
+        shell: alpine.sh --root {0}
+
+      - name: Setup Alpine aarch64
+        uses: jirutka/setup-alpine@v1
+        with:
+          arch: aarch64
+
+      - name: Compile aarch64
+        run: |
+          apk add --no-cache bash musl-dev linux-headers gcc make
+          gcc -Wall -static -o zapper-linux-aarch64 zapper.c
+        shell: alpine.sh --root {0}
+
+      - name: Upload binaries to release
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: zapper-*
+          file_glob: true
+          overwrite: true
+          tag: v1.1
+          # body: "Zap away the command line options"
+        
