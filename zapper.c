@@ -447,7 +447,7 @@ ptrace_until_execve(pid_t *pidp, struct user_regs_struct *regsp, int *status) {
                         // EVENT_EXIT should never trigger before EVENT_FORK (?). See Note #3.
                         break;
                     case PTRACE_EVENT_FORK:  // 1
-                    case PTRACE_EVENT_VFORK: // 2
+                    case PTRACE_EVENT_VFORK: ; // 2
                         unsigned long cpid;
                         XFAIL(ptrace(PTRACE_GETEVENTMSG, pid, NULL, &cpid) == -1, "ptrace(%d): %s\n", pid, strerror(errno));
                         DEBUGF(CDY"FORK "CY"%d"CDY" to cpid="CY"%lu\n"CN, pid, cpid);
