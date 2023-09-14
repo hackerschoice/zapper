@@ -8,12 +8,13 @@ chmod 755 zapper && \
 ./zapper -h
 ```
 
-Example: Only show 'nmap' without command options:
+Example: Show only 'nmap', but without the command options:
 ```sh
 ./zapper nmap -sCV -F -Pn scanme.nmap.org
+              ^^^^^^^^^^^^^^^^^^^^ will not show
 ```
 
-Example: Hide current shell and all sub processes as some kernel worker:
+Example: Hide the current shell and all sub processes as some kernel worker:
 ```sh
 exec ./zapper -f -a[kworker/1:0-rcu_gp] bash -il
 ```
