@@ -548,7 +548,7 @@ ptrace_until_execve(pid_t *pidp, struct user_regs_struct *regsp, int *status) {
 #endif
         if (ret == 1) {
             // PTRACE_GET_SYSCALL_INFO not available or call failed.
-            // FIXME: May need to use PTRACE_GETREGSET
+            // FIXME: May need to use PTRACE_GETREGSET to better support Linux < 5.3
         }
 
         *pidp = pid;
