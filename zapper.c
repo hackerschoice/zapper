@@ -220,7 +220,7 @@ Example - Start 'nmap', zap all options & make nmap appear as 'harmless':\n\
 Example - Hide current shell and all child processes:\n\
     $ "CC"exec ./zapper"CDC" -f -a- "CM"bash"CDM" -il"CN"\n\
 Example - Hide current shell and all child processes as some kernel worker:\n\
-    $ "CC"exec ./zapper"CDC" -f -a[kworker/1:0-rcu_gp] "CM"bash"CDM" -il"CN"\n\
+    $ "CC"exec ./zapper"CDC" -f -a'[kworker/1:0-rcu_gp]' "CM"bash"CDM" -il"CN"\n\
 \n\
 "CDY"Join us on Telegram: "CW"https://t.me/thcorg"CN"\n\
 ");
@@ -391,7 +391,6 @@ err:
  */
 static int
 ptrace_until_execve(pid_t *pidp, struct user_regs_struct *regsp, int *status) {
-    struct ptrace_syscall_info si;
     int signum;
     siginfo_t sigi;
     pid_t pid = *pidp;
@@ -518,19 +517,37 @@ ptrace_until_execve(pid_t *pidp, struct user_regs_struct *regsp, int *status) {
             continue;
         }
 
-        XFAIL(ptrace(PTRACE_GET_SYSCALL_INFO, pid, sizeof si, &si) <= 0, "ptrace(): %s\n", strerror(errno));
         if (ptrace(PTRACE_GETREGS, pid, NULL, regsp) != 0)
             GOTOERR("ptrace(GETREGS, %d): %s\n", pid, strerror(errno));
         if (OAX(*regsp) != SYS_execve)
             ERREXIT(255, "Not SYS_execve()\n"); // CAN NOT HAPPEN. We only trap execve().
 
-        DEBUGF("pid="CY"%d"CDY" OP #%d"CN" %d-%d\n", pid, si.op, (*status >> 8) & ~0x80, *status & 0xff);
-        if (si.op != PTRACE_EVENTMSG_SYSCALL_EXIT)
-            continue;
-        DEBUGF(" RET=%lld\n", si.exit.rval);
-        DEBUGF(" ISERR=%d\n", si.exit.is_error);
-        if (si.exit.is_error != 0)
-            continue;
+        // Linux prior 5.3 does not have GET_SYSCALL_INFO.
+        int ret = 1;
+#ifdef PTRACE_GET_SYSCALL_INFO
+        struct ptrace_syscall_info si;
+        ret = ptrace(PTRACE_GET_SYSCALL_INFO, pid, sizeof si, &si);
+
+        if (ret == 0) {
+            DEBUGF("pid="CY"%d"CDY" OP #%d"CN" %d-%d\n", pid, si.op, (*status >> 8) & ~0x80, *status & 0xff);
+            if (si.op != PTRACE_EVENTMSG_SYSCALL_EXIT)
+                continue;
+            DEBUGF(" RET=%lld\n", si.exit.rval);
+            DEBUGF(" ISERR=%d\n", si.exit.is_error);
+            if (si.exit.is_error != 0)
+                continue;
+            ret = 0;
+        } else {
+            if (errno != EIO)
+                ERREXIT(255, "ptrac(): %s\n", strerror(errno));
+            // HERE: No PTRACE_GET_SYSCALL_INFO.
+            // This can happen if using the Linux >= 5.3 static binary on Linux < 5.3
+        }
+#endif
+        if (ret == 1) {
+            // PTRACE_GET_SYSCALL_INFO not available or call failed.
+            // FIXME: May need to use PTRACE_GETREGSET
+        }
 
         *pidp = pid;
         return SYS_execve;
@@ -573,7 +590,11 @@ start_trace_parent(const char *orig_prog, char *new_argv[], struct user_regs_str
         // Check if CHILD (tracer) successfully attached to us; PARENT (tracee)
         if (ptrace(PTRACE_TRACEME, 0, NULL, NULL) == -1) {
             execvp(orig_prog, new_argv);
-            exit(255); // NOT REACHED
+            if (strchr(orig_prog, '/'))
+                fprintf(stderr, "%s: %s\n", orig_prog, strerror(errno));
+            else
+                fprintf(stderr, "%s: command not found\n", orig_prog);
+            exit(127);
         }
 
         // TRACER failed to trace us.
