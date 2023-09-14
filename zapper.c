@@ -543,6 +543,8 @@ ptrace_until_execve(pid_t *pidp, struct user_regs_struct *regsp, int *status) {
             // HERE: No PTRACE_GET_SYSCALL_INFO.
             // This can happen if using the Linux >= 5.3 static binary on Linux < 5.3
         }
+#else
+# warning "No PTRACE_GET_SYSCALL_INFO defined. Linux < 5.3? Using compat mode."
 #endif
         if (ret == 1) {
             // PTRACE_GET_SYSCALL_INFO not available or call failed.
