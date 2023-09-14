@@ -25,7 +25,7 @@
   * - The process name and options may show for a few milliseconds before
   *   the Kernel schedules zapper to zap them. (the only way around this is
   *   a trampoline app and passing the options via env and then recontructing
-  *   the argv during EVEN_EXEC.)
+  *   the argv during EVENT_EXEC.)
   */
 
 // See also:
@@ -56,7 +56,12 @@
 // * pick argv[0] at random
 // * PPID=1: Make all tracee's PPID's to be 1 and proxy the SIGCHLD to correct
 //   pid: Double-fork via trampoline app.
-// - Use pid < 1024
+// * Use pid < 1024
+// * Full Privacy: use a shell function "zap(){ ...; }" that embeds $@ into the
+//   environment (Z0=argv[0], Z1=argv[1],...Zn=argv[n]) and then calls zapper.
+//   Zapper then unpacks the Z0..Zn and puts the on the 'new stack'. This way
+//   the options wont show up in 'ps' at all (not even for a few milliseconds
+//   between the execve() and ptrace() call.
 
 #include <sys/ptrace.h>
 #include <sys/types.h>
