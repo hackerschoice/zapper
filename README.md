@@ -1,28 +1,31 @@
-<H2 align="center">Privacy for your command line options</H2>
+<H1 align="center">Privacy for your command line options</H2>
+<H3 align="center">A Linux tool to hide from `ps`</H2>
 
-Download:
+Download (static and upx obfuscated binary):
 ```sh
 curl -fL -o zapper https://da.gd/thczap/zapper-linux-x86_64 && \
 chmod 755 zapper && \
 ./zapper -h
 ```
 
-Example: Only show 'nmap' without command options:
+Example: Show only 'nmap', but without the command options:
 ```sh
 ./zapper nmap -sCV -F -Pn scanme.nmap.org
+              ^^^^^^^^^^^^^^^^^^^^ will not show
 ```
 
-Example: Hide current shell and all sub processes as some kernel worker:
+Example: Hide the current shell and all sub processes as some kernel worker:
 ```sh
 exec ./zapper -f -a[kworker/1:0-rcu_gp] bash -il
 ```
 
 ---
-1. Does not rely on *LD_PRELOAD=*
+1. Does not require *root*
 2. Works also on static binaries (e.g. GoLang)
 3. Zaps the environment (*/proc/&lt;PID&gt;/environ*) as well
-4. Does not require *root*
+1. Does not rely on *LD_PRELOAD=*
 5. Only 00.1% overhead.
+6. Stops root from sniffing your processes (`-f`) (with strace).
 
 ---
 Compile:
