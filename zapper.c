@@ -341,9 +341,45 @@ ptsetoptions(pid_t pid) {
     return ptrace(PTRACE_SETOPTIONS, pid, NULL, PTRACE_O_TRACESYSGOOD | PTRACE_O_EXITKILL | PTRACE_O_TRACEFORK | PTRACE_O_TRACEVFORK | PTRACE_O_TRACEEXEC);
 }
 
+// Emulate shell's exit string
+static void
+exit_emu_shell(int code, const char *prog) {
+    char *str;
+    char buf[1024];
+    char *ptr = &buf[0];
+    char *end = ptr + sizeof buf;
+    int is_path = 0;
+
+    if (strchr(prog, '/'))
+        is_path = 1;
+ 
+    // Emulate shell's exit string.
+    str = getenv("SHELL");
+    while (str) {
+        str = strrchr(str, '/');
+        if ((!str) || (*str == '\0'))
+            break;
+        str++;
+        // Zsh always prefixes with $SHELL.
+        // Bash only when 'No such file or directory'.
+        if ((!is_path) && (strcmp(str, "zsh")) != 0)
+            break;
+        ptr += MAX(0, snprintf(ptr, end - ptr, "%.64s: ", str));
+        break;
+    }
+
+    if (is_path)
+        snprintf(ptr, end - ptr, "%s: %s\n", prog, strerror(errno));
+    else
+        snprintf(ptr, end - ptr, "%s: command not found\n", prog);
+    
+    fprintf(stderr, "%s", buf);
+
+    exit(code);
+}
+
 static pid_t
 start_trace_child(const char *orig_prog, char *new_argv[]) {
-    char *str;
     int status;
 
     XFAIL((g_pid = fork()) < 0, "fork(): %s\n", strerror(errno));
@@ -351,17 +387,7 @@ start_trace_child(const char *orig_prog, char *new_argv[]) {
         // CHILD
         ptrace(PTRACE_TRACEME, 0, NULL, NULL);
         execvp(orig_prog, new_argv);
-
-        // Emulate shell's exit string.
-        str = getenv("SHELL");
-        if (str) {
-            str = strrchr(str, '/');
-            if ((str) && (*str != '\0'))
-                str++;
-        }
-
-        fprintf(stderr, "%s: %s: %s\n", str?:"", orig_prog, strerror(errno));
-        exit(127);
+        exit_emu_shell(127, orig_prog);
     }
 
     // PARENT
@@ -592,11 +618,7 @@ start_trace_parent(const char *orig_prog, char *new_argv[], struct user_regs_str
         // Check if CHILD (tracer) successfully attached to us; PARENT (tracee)
         if (ptrace(PTRACE_TRACEME, 0, NULL, NULL) == -1) {
             execvp(orig_prog, new_argv);
-            if (strchr(orig_prog, '/'))
-                fprintf(stderr, "%s: %s\n", orig_prog, strerror(errno));
-            else
-                fprintf(stderr, "%s: command not found\n", orig_prog);
-            exit(127);
+            exit_emu_shell(127, orig_prog);
         }
 
         // TRACER failed to trace us.
