@@ -217,10 +217,10 @@ Example - Start ssh but zap all options (only 'ssh' appears)\n\
     $ "CC"./zapper "CM"ssh"CDM" root@myserver.com"CN"\n\
 Example - Start 'nmap', zap all options & make nmap appear as 'harmless':\n\
     $ "CC"./zapper "CDC"-a harmless "CM"nmap"CDM" -sCV -F -Pn scanme.nmap.org"CN"\n\
-Example - Hide current shell and all child processes:\n\
+Example - Hide the current shell and all child processes (as empty string):\n\
     $ "CC"exec ./zapper"CDC" -f -a- "CM"bash"CDM" -il"CN"\n\
-Example - Hide current shell and all child processes as some kernel worker:\n\
-    $ "CC"exec ./zapper"CDC" -f -a'[kworker/1:0-rcu_gp]' "CM"bash"CDM" -il"CN"\n\
+Example - Hide tmux and all child processes as some kernel process:\n\
+    $ "CC"exec ./zapper"CDC" -f -a'[kworker/1:0-rcu_gp]' "CM"tmux"CDM" -il"CN"\n\
 \n\
 "CDY"Join us on Telegram: "CW"https://t.me/thcorg"CN"\n\
 ");
