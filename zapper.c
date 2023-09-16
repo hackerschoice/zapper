@@ -220,7 +220,7 @@ Example - Start 'nmap', zap all options & make nmap appear as 'harmless':\n\
 Example - Hide the current shell and all child processes (as empty string):\n\
     $ "CC"exec ./zapper"CDC" -f -a- "CM"bash"CDM" -il"CN"\n\
 Example - Hide tmux and all child processes as some kernel process:\n\
-    $ "CC"exec ./zapper"CDC" -f -a'[kworker/1:0-rcu_gp]' "CM"tmux"CDM" -il"CN"\n\
+    $ "CC"exec ./zapper"CDC" -f -a'[kworker/1:0-rcu_gp]' "CM"tmux"CN"\n\
 \n\
 "CDY"Join us on Telegram: "CW"https://t.me/thcorg"CN"\n\
 ");
