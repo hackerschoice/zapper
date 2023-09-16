@@ -335,11 +335,19 @@ ptpokecpy(pid_t pid, void *dst, void *src, size_t n)
     ptrace(PTRACE_POKEDATA, pid, dst, data.val);
 }
 
+int ptopts;
+#ifdef PTRACE_O_EXITKILL
+#define PTOPT_X_EXITKILL    PTRACE_O_EXITKILL
+#else
+# warning "PTRACE_O_EXITKILL not found. Super old linux kernel?"
+# define PTOPT_X_EXITKILL    (0)
+#endif
+
 static int
 ptsetoptions(pid_t pid) {
     // execve() delivers an extra TRAP, ignore it:
     // https://manpages.debian.org/bookworm/manpages-dev/ptrace.2.en.html
-    return ptrace(PTRACE_SETOPTIONS, pid, NULL, PTRACE_O_TRACESYSGOOD | PTRACE_O_EXITKILL | PTRACE_O_TRACEFORK | PTRACE_O_TRACEVFORK | PTRACE_O_TRACEEXEC);
+    return ptrace(PTRACE_SETOPTIONS, pid, NULL, PTRACE_O_TRACESYSGOOD | PTOPT_X_EXITKILL | PTRACE_O_TRACEFORK | PTRACE_O_TRACEVFORK | PTRACE_O_TRACEEXEC);
 }
 
 // Emulate shell's exit string
@@ -611,7 +619,11 @@ start_trace_parent(const char *orig_prog, char *new_argv[], struct user_regs_str
 
         // Wait for first child to exit. (See Note-#1)
         waitpid(pid, &ret, WUNTRACED);
+#ifdef PR_SET_PTRACER
         prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY);
+#else
+# warning "PR_SET_PTRACE_ANY not defined. SUper old linux?"
+#endif
 
         // Cant use kill(getpid(), SIGSTOP); because of prctl().
         close(up[0]);
