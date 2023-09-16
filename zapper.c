@@ -209,7 +209,7 @@ usage(void) {
 "CG"Hide command options and clear the environment of a command."CN"\n\
 \n\
 ./zapper [-f] [-a name] command ...\n\
-  -a <name>  Rename the process to 'name'. (Use -a \"\" for none).\n\
+  -a <name>  Rename the process to 'name'. (Use -a- for empty string).\n\
   -f         zap all child processes as well (follow).\n\
   -E         Do not zap the environment variables.\n\
 \n\
