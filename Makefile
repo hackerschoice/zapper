@@ -4,7 +4,7 @@ CFLAGS := $(CFLAGS) -O2 -Wall
 all: zapper
 
 dev:
-	CFLAGS="$(CFLAGS) -DDEBUG" make tests zapper
+	CFLAGS="$(CFLAGS) -DDEBUG" make zapper
 
 zapper: zapper.c
 	gcc $(CFLAGS) -static -o zapper zapper.c

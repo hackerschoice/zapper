@@ -241,6 +241,7 @@ do_getopts(int argc, char *argv[])
                 usage();
                 break;
             case 'D':
+                DEBUGF("DRYRUN is set\n");
                 g_flags |= FL_DRYRUN;
                 break;
             case 'E':
@@ -398,7 +399,7 @@ start_trace_child(const char *orig_prog, char *new_argv[]) {
     if (WIFEXITED(status))
         exit(WEXITSTATUS(status));
 
-    XFAIL(ptsetoptions(g_pid) != 0, "ptrace(%d): %s\n", g_pid, strerror(errno));
+    XFAIL(ptsetoptions(g_pid) == -1, "ptrace(%d): %s\n", g_pid, strerror(errno));
     set_proxy_signals();
 
     g_flags |= IS_TRACER_IS_PARENT;
@@ -425,7 +426,7 @@ ptrace_until_execve(pid_t *pidp, struct user_regs_struct *regsp, int *status) {
 
     *status = 0;
     while(1) {
-        if ((pid > 0) && (ptrace(PTRACE_CONT, pid, NULL, data) != 0))
+        if ((pid > 0) && (ptrace(PTRACE_CONT, pid, NULL, data) == -1))
             GOTOERR("ptrace(%d): %s\n", pid, strerror(errno));
         data = NULL;
         if ( (pid = waitpid(-1, status, WUNTRACED)) == -1)
@@ -526,7 +527,10 @@ ptrace_until_execve(pid_t *pidp, struct user_regs_struct *regsp, int *status) {
             }
 
             // Forward signal to offending process.
-            ptrace(PTRACE_GETSIGINFO, pid, NULL, &sigi);
+            if (ptrace(PTRACE_GETSIGINFO, pid, NULL, &sigi) == -1) {
+                DEBUGF("SHOULD NOT HAPPEN\n");
+                continue;
+            }
             // Do not forward SIGCHLD to report when child has stopped (by trap).
             if (signum == SIGCHLD) {
                 switch (sigi.si_code) {
@@ -543,7 +547,7 @@ ptrace_until_execve(pid_t *pidp, struct user_regs_struct *regsp, int *status) {
             continue;
         }
 
-        if (ptrace(PTRACE_GETREGS, pid, NULL, regsp) != 0)
+        if (ptrace(PTRACE_GETREGS, pid, NULL, regsp) == -1)
             GOTOERR("ptrace(GETREGS, %d): %s\n", pid, strerror(errno));
         if (OAX(*regsp) != SYS_execve)
             ERREXIT(255, "Not SYS_execve()\n"); // CAN NOT HAPPEN. We only trap execve().
@@ -554,7 +558,7 @@ ptrace_until_execve(pid_t *pidp, struct user_regs_struct *regsp, int *status) {
         struct ptrace_syscall_info si;
         ret = ptrace(PTRACE_GET_SYSCALL_INFO, pid, sizeof si, &si);
 
-        if (ret == 0) {
+        if (ret != -1) {
             DEBUGF("pid="CY"%d"CDY" OP #%d"CN" %d-%d\n", pid, si.op, (*status >> 8) & ~0x80, *status & 0xff);
             if (si.op != PTRACE_EVENTMSG_SYSCALL_EXIT)
                 continue;
@@ -565,7 +569,7 @@ ptrace_until_execve(pid_t *pidp, struct user_regs_struct *regsp, int *status) {
             ret = 0;
         } else {
             if (errno != EIO)
-                ERREXIT(255, "ptrac(): %s\n", strerror(errno));
+                ERREXIT(255, "ptrace(%d)=%d %s\n", pid, ret, strerror(errno));
             // HERE: No PTRACE_GET_SYSCALL_INFO.
             // This can happen if using the Linux >= 5.3 static binary on Linux < 5.3
         }
@@ -641,7 +645,7 @@ start_trace_parent(const char *orig_prog, char *new_argv[], struct user_regs_str
     if (read(up[0], &ret, sizeof ret) < 0)
         goto err;
 
-    if (ptrace(PTRACE_ATTACH, pid_tracee, NULL, NULL) != 0)
+    if (ptrace(PTRACE_ATTACH, pid_tracee, NULL, NULL) == -1)
         goto err;
 
     //  5 == SIGTRAP
@@ -650,7 +654,7 @@ start_trace_parent(const char *orig_prog, char *new_argv[], struct user_regs_str
     if (waitpid(pid_tracee, &ret, WUNTRACED) == -1)
         GOTOERR("waitpid(%d): %s\n", pid_tracee, strerror(errno));
 
-    XFAIL(ptsetoptions(pid_tracee) != 0, "ptrace(%d): %s\n", pid_tracee, strerror(errno));
+    XFAIL(ptsetoptions(pid_tracee) == -1, "ptrace(%d): %s\n", pid_tracee, strerror(errno));
 
     // Tell TRACEE that we are attached and TRACEE can call execve().
     if (write(up[0], &ret, sizeof ret) != sizeof ret)
@@ -934,7 +938,7 @@ start_trace(char *orig_prog, char *new_argv[], struct user_regs_struct *regsp) {
     g_flags |= FL_STAY_ATTACHED;
     pid = start_trace_child(orig_prog, new_argv);
     DEBUGF("[%d] Tracing child %d\n", getpid(), pid);
-    XFAIL(ptrace(PTRACE_GETREGS, pid, NULL, regsp) != 0, "ptrace(%d): %s\n", pid, strerror(errno));
+    XFAIL(ptrace(PTRACE_GETREGS, pid, NULL, regsp) == -1, "ptrace(%d): %s\n", pid, strerror(errno));
 done:
     if (enlarged_argv0) {
         free(enlarged_argv0);
