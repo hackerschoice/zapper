@@ -210,18 +210,25 @@ usage(void) {
 \n\
 ./zapper [-f] [-a name] command ...\n\
   -a <name>  Rename the process to 'name'. (Use -a- for empty string).\n\
-  -f         zap all child processes as well (follow).\n\
+  -f         Zap all child processes as well (follow).\n\
   -E         Do not zap the environment variables.\n\
 \n\
-Example - Start ssh but zap all options (only 'ssh' appears)\n\
-    $ "CC"./zapper "CM"ssh"CDM" root@myserver.com"CN"\n\
+Example - Start ssh but zap all options (only 'ssh' shows)\n\
+    "CDR"$ "CC"./zapper "CM"ssh"CDM" root@myserver.com"CN"\n\
 Example - Start 'nmap', zap all options & make nmap appear as 'harmless':\n\
-    $ "CC"./zapper "CDC"-a harmless "CM"nmap"CDM" -sCV -F -Pn scanme.nmap.org"CN"\n\
-Example - Hide the current shell and all child processes (as empty string):\n\
-    $ "CC"exec ./zapper"CDC" -f -a- "CM"bash"CDM" -il"CN"\n\
+    "CDR"$ "CC"./zapper "CDC"-a harmless "CM"nmap"CDM" -sCV -F -Pn scanme.nmap.org"CN"\n\
+Example - Start a PHP tool as a background daemon. Hide all as 'apache2\n\
+    "CDR"$ "CDC"("CC"./zapper "CDC"-f -a apache2 "CM"php"CDM" ~/public_html/tool.php "CDC"&>/dev/null &)"CN"\n\
 Example - Hide tmux and all child processes as some kernel process:\n\
-    $ "CC"exec ./zapper"CDC" -f -a'[kworker/1:0-rcu_gp]' "CM"tmux"CN"\n\
+    "CDR"$ "CC"./zapper"CDC" -f -a '[kworker/1:0-rcu_gp]' "CM"tmux"CN"\n\
+Example - Use 'exec' to replace the parent shell as well:\n\
+    "CDR"$ "CC"exec ./zapper"CDC" -f -a '[kworker/1:0-rcu_gp]' "CM"tmux"CN"\n\
+Example - Hide bash and all child processes (as empty string):\n\
+    "CDR"$ "CC"./zapper"CDC" -f -a- "CM"bash"CDM" -il"CN"\n\
+Example - Use 'exec' to replace the parent shell as well:\n\
+    "CDR"$ "CC"exec ./zapper"CDC" -f -a- "CM"bash"CDM" -il"CN"\n\
 \n\
+Check it is working: "CDC"ps -eF f"CN"\n\
 "CDY"Join us on Telegram: "CW"https://t.me/thcorg"CN"\n\
 ");
 
