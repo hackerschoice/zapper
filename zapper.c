@@ -218,7 +218,7 @@ Example - Start ssh but zap all options (only 'ssh' shows)\n\
 Example - Start 'nmap', zap all options & make nmap appear as 'harmless':\n\
     "CDR"$ "CC"./zapper "CDC"-a harmless "CM"nmap"CDM" -sCV -F -Pn scanme.nmap.org"CN"\n\
 Example - Start a PHP tool as a background daemon. Hide all as 'apache2\n\
-    "CDR"$ "CDC"("CC"./zapper "CDC"-f -a apache2 "CM"php"CDM" ~/public_html/tool.php "CDC"&>/dev/null &)"CN"\n\
+    "CDR"$ "CDC"("CC"./zapper "CDC"-f -a /usr/sbin/apache2 "CM"php"CDM" ~/www/tool.php "CDC"&>/dev/null &)"CN"\n\
 Example - Hide tmux and all child processes as some kernel process:\n\
     "CDR"$ "CC"./zapper"CDC" -f -a '[kworker/1:0-rcu_gp]' "CM"tmux"CN"\n\
 Example - Use 'exec' to replace the parent shell as well:\n\
