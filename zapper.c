@@ -63,6 +63,9 @@
 //   the options wont show up in 'ps' at all (not even for a few milliseconds
 //   between the execve() and ptrace() call.
 
+#define _GNU_SOURCE
+#include <sched.h>
+
 #include <sys/ptrace.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -70,6 +73,7 @@
 #include <sys/prctl.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
+#include <sys/mman.h>
 #include <linux/ptrace.h>
 #include <syscall.h>
 
@@ -97,6 +101,11 @@ static union u {
     long val;
     char c[sizeof (long)];
 } data;
+
+// Fast Forwarding pids
+struct wrk {
+    int io[2];
+};
 
 // ANSI color codes.
 #define CDR        "\033[0;31m"
@@ -140,11 +149,6 @@ FILE *out;
     goto err; \
 } while (0)
 
-char *g_cur_prg_name;
-pid_t g_pid;
-int g_flags;
-pid_t g_pid_master;
-pid_t g_pid_zapper;
 #define FL_FOLLOW                 (0x01)
 #define FL_STAY_ATTACHED          (0x02)
 #define FL_FORCE_TRACER_IS_PARENT (0x04)
@@ -153,6 +157,23 @@ pid_t g_pid_zapper;
 #define IS_SIGNAL_PROXY           (0x20)
 #define FL_PRGNAME                (0x40)
 #define FL_DRYRUN                 (0x80)
+#define FL_MAKE_SMALL            (0x100)
+#define FL_IS_CURSOR_OFF         (0x200)
+#define FL_IS_QUIET              (0x400)
+
+char *g_cur_prg_name;
+pid_t g_pid;
+int g_flags;
+pid_t g_pid_master;
+pid_t g_pid_zapper;
+// Fast Forwarding pids:
+#define MAX_WORKERS        (16)
+pid_t g_max_pid;
+pid_t *g_ff_pidp;   // mmap() between all workers. Atomic.
+pid_t g_ff_final_pid;
+char stack[1024];
+
+static int fast_forward_pid(pid_t target);
 
 static void
 dumpfile(const char *file, void *data, size_t n)
@@ -203,6 +224,28 @@ set_proxy_signals(void) {
     signal(SIGWINCH, cb_signal);
 }
 
+static pid_t
+read_max_pid(void) {
+    char buf[1024];
+    size_t sz;
+    pid_t max = 4194304;
+
+    FILE *fp = fopen("/proc/sys/kernel/pid_max", "rb");
+    if (!fp)
+        return 4194304;  // Educated guess.
+    
+    sz = fread(buf, 1, sizeof buf, fp);
+    fclose(fp);
+    if (sz <= 0)
+        return 4194304;
+    
+    max = atoi(buf);
+    if (max <= 300) // Cant be true.
+        return 4194304;
+
+    return max;
+}
+
 static void
 usage(void) {
     printf("\
@@ -212,13 +255,16 @@ usage(void) {
   -a <name>  Rename the process to 'name'. (Use -a- for empty string).\n\
   -f         Zap all child processes as well (follow).\n\
   -E         Do not zap the environment variables.\n\
+  -p <num>   Fast forward to this pid (Use -p0 to start with smallest pid possible)\n\
 \n\
 Example - Start ssh but zap all options (only 'ssh' shows)\n\
     "CDR"$ "CC"./zapper "CM"ssh"CDM" root@myserver.com"CN"\n\
 Example - Start 'nmap', zap all options & make nmap appear as 'harmless':\n\
     "CDR"$ "CC"./zapper "CDC"-a harmless "CM"nmap"CDM" -sCV -F -Pn scanme.nmap.org"CN"\n\
-Example - Start a PHP tool as a background daemon. Hide all as 'apache2\n\
-    "CDR"$ "CDC"("CC"./zapper "CDC"-f -a /usr/sbin/apache2 "CM"php"CDM" ~/www/tool.php "CDC"&>/dev/null &)"CN"\n\
+Example - Same but also as a lowest PID possible:\n\
+    "CDR"$ "CC"./zapper "CDC"-a harmless -p0 "CM"nmap"CDM" -sCV -F -Pn scanme.nmap.org"CN"\n\
+Example - Start a PHP tool as a background daemon. Hide all as 'apache2 -k...'\n\
+    "CDR"$ "CDC"("CC"./zapper "CDC"-f -a '/usr/sbin/apache2 -k start' "CM"php"CDM" tool.php "CDC"&>/dev/null &)"CN"\n\
 Example - Hide tmux and all child processes as some kernel process:\n\
     "CDR"$ "CC"./zapper"CDC" -f -a '[kworker/1:0-rcu_gp]' "CM"tmux"CN"\n\
 Example - Use 'exec' to replace the parent shell as well:\n\
@@ -241,8 +287,10 @@ do_getopts(int argc, char *argv[])
     char buf[4096];
     char dst[sizeof buf];
     char *ptr;
+    pid_t ff_pid = -1;
+    char *ff_optarg = NULL;
 
-    while ( (c = getopt(argc, argv, "+a:fcEhD")) != -1) {
+    while ( (c = getopt(argc, argv, "+a:p:fcEhD")) != -1) {
         switch (c) {
             case 'h':
                 usage();
@@ -272,33 +320,275 @@ do_getopts(int argc, char *argv[])
                 // e.g. shell -> zapper -> orig
                 g_flags |= FL_FORCE_TRACER_IS_PARENT;
                 break;
+            case 'p':
+                if (*optarg == '-')
+                    break;  // See Note #3
+                ff_pid = atoi(optarg);
+                ff_optarg = optarg;
+                break;
             case '?':
                 usage();
         }
     }
 
-    if (argv[optind] == NULL)
+
+    if ((argv[optind] == NULL) && (ff_pid < 0))
         usage();
 
+    // Bail if trying to set the PID of a process that is started as
+    // a foreground process (attached to the shell). This is not
+    // possible: Zapper can only claim the new PID by calling fork()
+    // and allowing the parent-zapper to exit. This would detach the
+    // process from the shell's process group (because parent pid would
+    // become 1) and put zapper and/or the target process into the background
+    // and detach itself from the terminal - that's likely not what the user
+    // wants.
+    int is_background = 0;
+    // Method 1: Mostly, when user's start a process with & they like it to
+    // disconnect from the shell's job control. We do this for them:
+    // if (getpgrp() != tcgetpgrp(STDOUT_FILENO))
+        // is_background = 1;
+    // Method 2: Check if it's disconnected from the job control:
+    if (!isatty(STDIN_FILENO))
+        is_background = 1;
+    if ((ff_pid >= 0) && (!is_background) && (argv[optind] != NULL)) {
+        ptr = buf;
+        char *str;
+        char *end = buf + sizeof buf;
+        // Construct all argv except "-p1234" or "-p 1234"
+        for (c = 1; c < argc; c++) {
+            str = argv[c];
+            if (strncmp(str, "-p", 2) == 0) {
+                if (strlen(str) == 2)
+                    c++; // "-p" "1000" variant.
+                continue;
+            }
+            ptr += snprintf(ptr, end - ptr, "%s ", str);
+        }
+        // Lying: More precise: Can not set the PID of a process that
+        // is part of the job-control of the shell...
+        fprintf(stderr, "\n\
+"CDY"Can not set the PID of a process is that is started in the foreground"CN".\n\
+Instead, execute:\n\
+    "CC"./zapper "CDC"-p%s; "CC"./zapper "CDC"%s"CN"\n\
+or start the process in the background:\n\
+    "CDC"("CC"./zapper "CDC"-p%s %s &>/dev/null &)"CN"\n", ff_optarg, buf, ff_optarg, buf);
+        exit(255);
+    }
+    
     // When -f without -a is used then we still like to rename
     // 'zapper' to the name of the first tracee:
-    if (! (g_flags & FL_PRGNAME) ) {
-        if ( (ptr = strrchr(argv[optind], '/')) )
-            g_cur_prg_name = ++ptr;
-        else
-            g_cur_prg_name = argv[optind];
+    if (argv[optind] != NULL) {
+        if (! (g_flags & FL_PRGNAME) ) {
+            if ( (ptr = strrchr(argv[optind], '/')) )
+                g_cur_prg_name = ++ptr;
+            else
+                g_cur_prg_name = argv[optind];
+        }
     }
 
-    if (strcmp(argv[0], g_cur_prg_name) != 0) {
+    if ((g_cur_prg_name) && (strcmp(argv[0], g_cur_prg_name) != 0)) {
         // argv[0] is still 'zapper'. Execute ourself to fake our own argv[0]
-        argv[0] = g_cur_prg_name;
         snprintf(buf, sizeof buf, "/proc/%d/exe", getpid());
         if (realpath(buf, dst) == NULL)
-            ERREXIT(255, "realpath(%s): %s\n", buf, strerror(errno));
+            ERREXIT(255, "realpath(%s -> %s): %s\n", argv[0], buf, strerror(errno));
+        argv[0] = g_cur_prg_name;
         execv(dst, argv);
     }
 
+    if (ff_pid >= 0) {
+        fast_forward_pid(ff_pid);
+        if (argv[optind] == NULL) {
+            if (! (g_flags & FL_IS_QUIET))
+                printf(CDG"SUCCESS"CN". Next process will start with PID "CDY"%d"CN".\n", g_ff_final_pid);
+            exit(0);
+        }
+        if (g_flags & FL_STAY_ATTACHED) {
+            // Note #3:
+            // _THIS_ process will stay attached (wont exit) and thus needs
+            // to claim the new pid by forking and executing itself.
+            // Destroy the -p option (with '-') to prevent
+            // executing this part twice.
+            *ff_optarg = '-';
+            pid_t pid;
+            pid = fork();
+            if (pid < 0)
+                ERREXIT(255, "fork(): %s\n", strerror(errno));
+            if (pid > 0)
+                exit(0); // Parent.
+            execv(dst, argv);
+        }
+    }
+
     return optind;
+}
+
+// Worker 1..MAX_WORKERS end at target-MAX_WORKERS and only the first
+// worker will fork-forward the last MAX_WORKERS pids to the target.
+static void
+fast_forward_pid_worker(int worker, pid_t stop) {
+    pid_t p = getpid();
+    pid_t old_p = 0;
+    int make_small = 0;
+    int loops = 0;
+
+    if (stop < 0)
+        stop = g_max_pid + stop;
+
+    if (stop < p)
+        make_small = 1;
+    if ((! (g_flags & FL_MAKE_SMALL)) && (make_small))
+        exit(0);
+    // printf("#%d Stop at %d (me=%d, make-small=%d)\n", worker, stop, p, make_small);
+
+    if (stop == p)
+        exit(0);
+
+    while (1) {
+        old_p = p;
+        p = clone((int (*)(void *))exit, stack + sizeof stack, CLONE_VM | SIGCHLD, NULL);
+        // p = clone(fexit, stack + sizeof stack, CLONE_VM | SIGCHLD, NULL);
+        if (p <= 0)
+            break;
+        *g_ff_pidp = p; // Copy to shared memory (for stats)
+        p = waitpid(-1, NULL, 0);
+        if (p <= 0)
+            break;
+        if (p < old_p) {
+            if (!make_small)
+                exit(0); // target cant be reached.
+            if (++loops >= 2)
+                exit(0); // Looping. max_pid bad?
+            make_small = 0;
+        }
+        if (make_small)
+            continue;
+        if (p >= stop) {
+            // printf("END #%d at %d (old-pid=%d)\n", worker, p, old_p);
+            exit(0);
+        }
+    }
+    printf("clone(): %s\n", strerror(errno));
+    exit(0);
+}
+
+pid_t g_ff_target;
+pid_t g_ff_total_distance;
+static void
+cb_alarm(int sig) {
+    pid_t left;
+
+    left = g_ff_target - *g_ff_pidp;
+    if (left < 0)
+        left += g_max_pid;
+
+    fprintf(stderr, "\rFast forwarding to PID %d: %02.02f%%...", g_ff_target, 100 - (double)(left * 100) / g_ff_total_distance);
+    alarm(1);
+}
+
+static void
+cb_reset(int sig) {
+    if (g_flags & FL_IS_CURSOR_OFF)
+        fprintf(stderr, "\e[?25h");
+    g_flags &= ~FL_IS_CURSOR_OFF;
+    signal(sig, SIG_DFL);
+    kill(0, sig);
+}
+
+// Return 0 when target pid has been reached.
+static int
+fast_forward_pid(pid_t target) {
+    pid_t pid;
+    pid_t old_pid;
+    struct wrk workers[MAX_WORKERS];
+    int n_workers = 0;
+    int i;
+    int ret;
+
+    g_ff_target = target;
+    if (g_max_pid <= 0)
+        g_max_pid = read_max_pid();
+
+    pid = getpid();
+    if (target == pid + 1)
+        return 0;
+
+    if (! (g_flags & FL_IS_QUIET)) {
+        // Statistics every 1 second.
+        g_ff_pidp = mmap(NULL, sizeof *g_ff_pidp, PROT_READ|PROT_WRITE, MAP_SHARED|MAP_ANONYMOUS, -1, 0);
+        *g_ff_pidp = pid;
+        g_ff_total_distance = target - pid;
+        if (g_ff_total_distance < 0)
+            g_ff_total_distance += g_max_pid;
+    }
+
+    g_flags &= ~FL_MAKE_SMALL;
+    if (target <= pid)
+        g_flags |= FL_MAKE_SMALL;
+
+    for (i = 0; i < MAX_WORKERS; i++) {
+        old_pid = pid;
+        // Spread workers over processes (not threads)
+        socketpair(AF_UNIX, SOCK_STREAM, 0, workers[i].io);
+        pid = fork();
+        if (pid == 0) {
+            close(workers[i].io[0]);
+            // Wait for parent to tell us to start.
+            ret = read(workers[i].io[1], &pid, sizeof pid); // read dummy.
+            close(workers[i].io[1]);
+            if (ret >= 0)
+                fast_forward_pid_worker(i, i==0?target-1:(target-MAX_WORKERS*2));
+            exit(0); // CHILD exit
+        }
+        close(workers[i].io[1]);
+        // printf("started pid %d\n", pid);
+        n_workers++;
+
+        if (g_flags & FL_MAKE_SMALL) {
+            if (pid > old_pid)
+                continue;
+            g_flags &= ~FL_MAKE_SMALL;
+        }
+        // HERE: make larger
+        if (pid >= target - MAX_WORKERS)
+            break;
+    }
+
+    // Tell all workers to start fast forwarding pids.
+    for (i = 0; i < n_workers; i++) {
+        close(workers[i].io[0]);
+    }
+
+    // Set signal and atexit() after spawning childs (!).
+    if (! (g_flags & FL_IS_QUIET)) {
+        signal(SIGINT, cb_reset);
+        signal(SIGTERM, cb_reset);
+        g_flags |= FL_IS_CURSOR_OFF;
+        fprintf(stderr, "\033[?25l"); // Hide cursor
+        signal(SIGALRM, cb_alarm);
+        cb_alarm(0);
+    }
+
+    // Wait for all workers to complete
+    while (n_workers > 0) {
+        waitpid(-1, NULL, 0);
+        n_workers--;
+    }
+
+    if (! (g_flags & FL_IS_QUIET)) {
+        // Output statistics
+        fprintf(stderr, "\r\e[?25h\e[K\r");
+        signal(SIGALRM, SIG_DFL);
+        signal(SIGINT, SIG_DFL);
+        signal(SIGTERM, SIG_DFL);
+        if (g_ff_pidp) {
+            g_ff_final_pid = (*g_ff_pidp + 1);
+            munmap(g_ff_pidp, sizeof *g_ff_pidp);
+            g_ff_pidp = NULL;
+        }
+    }
+
+    return 0;
 }
 
 // Read data from pid@src to dest.
