@@ -12,13 +12,6 @@
  *
  * Compile:
  *     gcc -o zapper zapper.c
- *
- * Hide options:
- *     ./zapper nmap -sS 192.168.0.0/24
- * Hide options and rename process 'nmap' to 'blah':
- *     ./zapper -a blah nmap -sS 192.168.0.0/24
- *
- * exec ./zapper -f -a BlahBlub bash -il
  */
 
  /* Security:
@@ -26,6 +19,8 @@
   *   the Kernel schedules zapper to zap them. (the only way around this is
   *   a trampoline app and passing the options via env and then recontructing
   *   the argv during EVENT_EXEC.)
+  * - Some apps will show the process name as well as /proc/PID/exe (the
+  *   executeable filename) - which is not hidden (see "Full Privacy" below).
   */
 
 // See also:
@@ -35,8 +30,8 @@
 // - https://elixir.bootlin.com/linux/v5.19.17/source/include/uapi/asm-generic/siginfo.h
 
 // TODO:
-// * Follow (-f) from a separate process. At the moment, zapper starts first
-//     and is the parent to all tracees (like strace does).
+// * Follow (-f) from a separate process. Current '-f' makes zapper
+//     the parent to all tracees (like strace does):
 //     ptrace_scope > 0 prevents the tracer (zapper) to be a separate process
 //     that is not a parent of the tracees.
 //     We could set prctl(, PR_SET_PTRACER_ANY) in zapper before execve() of the
@@ -45,7 +40,7 @@
 //     the tracee or hook SYS_execve() and execute any new process via a
 //     trampoline program (zapper) to set prctl before calling execve on the
 //     original program.
-// * -p to zap argv/env from an existing process: Search through .stack
+// * -x to zap argv/env from an existing process: Search through .stack
 //     and .heap and modify any pointer that points inside argv[] region.
 //     Copy old argv[] to unused stack region that Linux creates to randomize
 //     its stack.
@@ -56,7 +51,6 @@
 // * pick argv[0] at random
 // * PPID=1: Make all tracee's PPID's to be 1 and proxy the SIGCHLD to correct
 //   pid: Double-fork via trampoline app.
-// * Use pid < 1024
 // * Full Privacy: use a shell function "zap(){ ...; }" that embeds $@ into the
 //   environment (Z0=argv[0], Z1=argv[1],...Zn=argv[n]) and then calls zapper.
 //   Zapper then unpacks the Z0..Zn and puts the on the 'new stack'. This way
@@ -97,15 +91,15 @@
 #define IP(reg)  (reg).eip
 #endif
 
+// https://elixir.bootlin.com/linux/latest/source/kernel/pid.c#L64
+#ifndef RESERVED_PIDS
+# define RESERVED_PIDS		300
+#endif
+
 static union u {
     long val;
     char c[sizeof (long)];
 } data;
-
-// Fast Forwarding pids
-struct wrk {
-    int io[2];
-};
 
 // ANSI color codes.
 #define CDR        "\033[0;31m"
@@ -157,7 +151,6 @@ FILE *out;
 #define IS_SIGNAL_PROXY           (0x20)
 #define FL_PRGNAME                (0x40)
 #define FL_DRYRUN                 (0x80)
-#define FL_MAKE_SMALL            (0x100)
 #define FL_IS_CURSOR_OFF         (0x200)
 #define FL_IS_QUIET              (0x400)
 
@@ -167,10 +160,15 @@ int g_flags;
 pid_t g_pid_master;
 pid_t g_pid_zapper;
 // Fast Forwarding pids:
-#define MAX_WORKERS        (16)
+#ifdef DEBUG
+# define MAX_WORKERS        (3)
+#else
+# define MAX_WORKERS        (8)
+#endif
 pid_t g_max_pid;
 pid_t *g_ff_pidp;   // mmap() between all workers. Atomic.
-pid_t g_ff_final_pid;
+pid_t g_ff_next_pid;
+int g_ff_opt_workers;
 char stack[1024];
 
 static int fast_forward_pid(pid_t target);
@@ -193,6 +191,7 @@ init_vars()
     g_pid_zapper = getpid();
     g_flags |= FL_STAY_ATTACHED;
     g_flags |= FL_ZAP_ENV;
+    g_ff_opt_workers = MAX_WORKERS;
 
 #ifdef DEBUG
     if (getenv("DEBUG_LOG")) {
@@ -255,15 +254,15 @@ usage(void) {
   -a <name>  Rename the process to 'name'. (Use -a- for empty string).\n\
   -f         Zap all child processes as well (follow).\n\
   -E         Do not zap the environment variables.\n\
-  -p <num>   Fast forward to this pid (Use -p0 to start with smallest pid possible)\n\
+  -p <num>   Fast forward to this pid (-p 300 if often the smallest possible)\n\
 \n\
 Example - Start ssh but zap all options (only 'ssh' shows)\n\
     "CDR"$ "CC"./zapper "CM"ssh"CDM" root@myserver.com"CN"\n\
 Example - Start 'nmap', zap all options & make nmap appear as 'harmless':\n\
     "CDR"$ "CC"./zapper "CDC"-a harmless "CM"nmap"CDM" -sCV -F -Pn scanme.nmap.org"CN"\n\
-Example - Same but also as a lowest PID possible:\n\
+Example - Same but also with the lowest possibl process id:\n\
     "CDR"$ "CC"./zapper "CDC"-a harmless -p0 "CM"nmap"CDM" -sCV -F -Pn scanme.nmap.org"CN"\n\
-Example - Start a PHP tool as a background daemon. Hide all as 'apache2 -k...'\n\
+Example - Start a PHP script as a background daemon. Hidden as 'apache2 -k...'\n\
     "CDR"$ "CDC"("CC"./zapper "CDC"-f -a '/usr/sbin/apache2 -k start' "CM"php"CDM" tool.php "CDC"&>/dev/null &)"CN"\n\
 Example - Hide tmux and all child processes as some kernel process:\n\
     "CDR"$ "CC"./zapper"CDC" -f -a '[kworker/1:0-rcu_gp]' "CM"tmux"CN"\n\
@@ -287,10 +286,10 @@ do_getopts(int argc, char *argv[])
     char buf[4096];
     char dst[sizeof buf];
     char *ptr;
-    pid_t ff_pid = -1;
+    pid_t ff_opt_pid = -1;
     char *ff_optarg = NULL;
 
-    while ( (c = getopt(argc, argv, "+a:p:fcEhD")) != -1) {
+    while ( (c = getopt(argc, argv, "+a:p:t:fcEhD")) != -1) {
         switch (c) {
             case 'h':
                 usage();
@@ -322,17 +321,19 @@ do_getopts(int argc, char *argv[])
                 break;
             case 'p':
                 if (*optarg == '-')
-                    break;  // See Note #3
-                ff_pid = atoi(optarg);
+                    break;  // See Note #3, '-' is used internally
+                ff_opt_pid = atoi(optarg);
                 ff_optarg = optarg;
+                break;
+            case 't':
+                g_ff_opt_workers = atoi(optarg);
                 break;
             case '?':
                 usage();
         }
     }
 
-
-    if ((argv[optind] == NULL) && (ff_pid < 0))
+    if ((argv[optind] == NULL) && (ff_opt_pid < 0))
         usage();
 
     // Bail if trying to set the PID of a process that is started as
@@ -351,7 +352,7 @@ do_getopts(int argc, char *argv[])
     // Method 2: Check if it's disconnected from the job control:
     if (!isatty(STDIN_FILENO))
         is_background = 1;
-    if ((ff_pid >= 0) && (!is_background) && (argv[optind] != NULL)) {
+    if ((ff_opt_pid >= 0) && (!is_background) && (argv[optind] != NULL)) {
         ptr = buf;
         char *str;
         char *end = buf + sizeof buf;
@@ -363,12 +364,17 @@ do_getopts(int argc, char *argv[])
                     c++; // "-p" "1000" variant.
                 continue;
             }
+            if (strncmp(str, "-t", 2) == 0) {
+                if (strlen(str) == 2)
+                    c++;
+                continue;
+            }
             ptr += snprintf(ptr, end - ptr, "%s ", str);
         }
         // Lying: More precise: Can not set the PID of a process that
         // is part of the job-control of the shell...
         fprintf(stderr, "\n\
-"CDY"Can not set the PID of a process is that is started in the foreground"CN".\n\
+"CDY"Can not set the PID of a process that is started in the foreground"CN".\n\
 Instead, execute:\n\
     "CC"./zapper "CDC"-p%s; "CC"./zapper "CDC"%s"CN"\n\
 or start the process in the background:\n\
@@ -396,11 +402,17 @@ or start the process in the background:\n\
         execv(dst, argv);
     }
 
-    if (ff_pid >= 0) {
-        fast_forward_pid(ff_pid);
+    if (ff_opt_pid >= 0) {
+        fast_forward_pid(ff_opt_pid);
         if (argv[optind] == NULL) {
-            if (! (g_flags & FL_IS_QUIET))
-                printf(CDG"SUCCESS"CN". Next process will start with PID "CDY"%d"CN".\n", g_ff_final_pid);
+            if (! (g_flags & FL_IS_QUIET)) {
+                buf[0] = '\0';
+                if (ff_opt_pid < RESERVED_PIDS)
+                    snprintf(buf, sizeof buf, " ("CDR"PIDs < %d are reserverd and inaccessible"CN")", RESERVED_PIDS);
+
+                g_ff_next_pid = MAX(RESERVED_PIDS, g_ff_next_pid);
+                printf(CDG"SUCCESS"CN". Next process will start with PID "CDY"%d"CN"%s.\n", g_ff_next_pid, buf);
+            }
             exit(0);
         }
         if (g_flags & FL_STAY_ATTACHED) {
@@ -429,49 +441,39 @@ static void
 fast_forward_pid_worker(int worker, pid_t stop) {
     pid_t p = getpid();
     pid_t old_p = 0;
-    int make_small = 0;
-    int loops = 0;
+    int need_wraparound = 0;
 
     if (stop < 0)
         stop = g_max_pid + stop;
 
-    if (stop < p)
-        make_small = 1;
-    if ((! (g_flags & FL_MAKE_SMALL)) && (make_small))
-        exit(0);
-    // printf("#%d Stop at %d (me=%d, make-small=%d)\n", worker, stop, p, make_small);
+    if (p > stop)
+        need_wraparound = 1;
 
-    if (stop == p)
+    if (p == stop)
         exit(0);
 
+    signal(SIGCHLD, SIG_IGN);
     while (1) {
+        if (!need_wraparound) {
+            if (*g_ff_pidp >= stop)
+                exit(0); 
+        }  
         old_p = p;
-        p = clone((int (*)(void *))exit, stack + sizeof stack, CLONE_VM | SIGCHLD, NULL);
-        // p = clone(fexit, stack + sizeof stack, CLONE_VM | SIGCHLD, NULL);
+        p = clone((int (*)(void *))exit, stack + sizeof stack, CLONE_VFORK | CLONE_VM | SIGCHLD, NULL);
         if (p <= 0)
             break;
-        *g_ff_pidp = p; // Copy to shared memory (for stats)
-        p = waitpid(-1, NULL, 0);
-        if (p <= 0)
-            break;
-        if (p < old_p) {
-            if (!make_small)
-                exit(0); // target cant be reached.
-            if (++loops >= 2)
-                exit(0); // Looping. max_pid bad?
-            make_small = 0;
-        }
-        if (make_small)
-            continue;
-        if (p >= stop) {
-            // printf("END #%d at %d (old-pid=%d)\n", worker, p, old_p);
-            exit(0);
-        }
+        // FIXME: Should use MUTEX for access but it's so much faster to
+        // only have 1 worker to do the 'last mile' and have all other workers
+        // stop 8 * MAX_WORKERS before the target pid is hit.
+        *g_ff_pidp = p; // Copy to shared memory
+        if (p < old_p)
+            need_wraparound = 0;
     }
-    printf("clone(): %s\n", strerror(errno));
+    fprintf(stderr, "#%d clone(): %s (try -t 1)\n", worker, strerror(errno));
     exit(0);
 }
 
+pid_t g_ff_opt_target; // For display purposes.
 pid_t g_ff_target;
 pid_t g_ff_total_distance;
 static void
@@ -482,7 +484,7 @@ cb_alarm(int sig) {
     if (left < 0)
         left += g_max_pid;
 
-    fprintf(stderr, "\rFast forwarding to PID %d: %02.02f%%...", g_ff_target, 100 - (double)(left * 100) / g_ff_total_distance);
+    fprintf(stderr, "\rFast forwarding to PID %d: %02.02f%%...", g_ff_opt_target, 100 - (double)(left * 100) / g_ff_total_distance);
     alarm(1);
 }
 
@@ -495,24 +497,31 @@ cb_reset(int sig) {
     kill(0, sig);
 }
 
-// Return 0 when target pid has been reached.
+// Return 0 when next pid is the target pid or close to it.
 static int
-fast_forward_pid(pid_t target) {
+fast_forward_pid(pid_t opt_target) {
     pid_t pid;
-    pid_t old_pid;
-    struct wrk workers[MAX_WORKERS];
+    pid_t target;
     int n_workers = 0;
     int i;
-    int ret;
+    int need_wraparound = 0;
 
-    g_ff_target = target;
+    g_ff_opt_target = opt_target;
+
     if (g_max_pid <= 0)
         g_max_pid = read_max_pid();
 
-    pid = getpid();
-    if (target == pid + 1)
-        return 0;
+    // Normalize target is specified to large by user
+    target = MIN(opt_target, g_max_pid - 1);
 
+    // On some Docker it is possible to get PID < 300
+
+    g_ff_target = target;
+
+    pid = getpid();
+    if (target == (pid + 1) % g_max_pid)
+        return 0; // Next pid is already our target pid.
+    
     if (! (g_flags & FL_IS_QUIET)) {
         // Statistics every 1 second.
         g_ff_pidp = mmap(NULL, sizeof *g_ff_pidp, PROT_READ|PROT_WRITE, MAP_SHARED|MAP_ANONYMOUS, -1, 0);
@@ -522,42 +531,59 @@ fast_forward_pid(pid_t target) {
             g_ff_total_distance += g_max_pid;
     }
 
-    g_flags &= ~FL_MAKE_SMALL;
-    if (target <= pid)
-        g_flags |= FL_MAKE_SMALL;
-
-    for (i = 0; i < MAX_WORKERS; i++) {
-        old_pid = pid;
-        // Spread workers over processes (not threads)
-        socketpair(AF_UNIX, SOCK_STREAM, 0, workers[i].io);
-        pid = fork();
-        if (pid == 0) {
-            close(workers[i].io[0]);
-            // Wait for parent to tell us to start.
-            ret = read(workers[i].io[1], &pid, sizeof pid); // read dummy.
-            close(workers[i].io[1]);
-            if (ret >= 0)
-                fast_forward_pid_worker(i, i==0?target-1:(target-MAX_WORKERS*2));
-            exit(0); // CHILD exit
+    for (i = 0; i < g_ff_opt_workers; i++) {
+        // Calculate where the worker should stop. Only worker #0
+        // does the last few pids (e.g. the last mile).
+        pid_t stop;
+        if (i == 0) {
+            // Worker #0
+            // If the user precisly wishes for 300 then stop at 300. Otherwise try to
+            // hit the target (even if within reserved range) anyway (which is possible
+            // on some versions of Docker)
+            if (target == RESERVED_PIDS)
+                stop = g_max_pid - 1;
+            else
+                stop = target - 1;
+        } else {
+            // Other workers
+            if (target <= RESERVED_PIDS + g_ff_opt_workers * 8)
+                // Target 0..300 + 16 * 8 => Stop way before MAX_PID
+                stop = g_max_pid - 1 - g_ff_opt_workers * 8;
+            else
+                stop = target - g_ff_opt_workers*8;
         }
-        close(workers[i].io[1]);
-        // printf("started pid %d\n", pid);
+        if (stop <= pid)
+            need_wraparound = 1;
+        DEBUGF("#%d STOPPING at %ld (target=%d) (cur=%ld, need_wraparound=%d)\n", i, stop, target, pid, need_wraparound);
+
+        pid = fork();
+        if (pid < 0) {
+            fprintf(stderr, "#%d fork(): %s\n", i, strerror(errno));
+            break;
+        }
+        *g_ff_pidp = pid;
         n_workers++;
 
-        if (g_flags & FL_MAKE_SMALL) {
-            if (pid > old_pid)
-                continue;
-            g_flags &= ~FL_MAKE_SMALL;
+        if (pid == 0) {
+            // CHILD
+            fast_forward_pid_worker(i, stop);
+            exit(0); // CHILD exit
         }
-        // HERE: make larger
-        if (pid >= target - MAX_WORKERS)
-            break;
+
+        if (i == 0) {
+            // Worker #0
+            if (pid == stop)
+                break;
+        } else {
+            if (need_wraparound) {
+                if (pid == stop)
+                    break;
+            }
+        }
     }
 
-    // Tell all workers to start fast forwarding pids.
-    for (i = 0; i < n_workers; i++) {
-        close(workers[i].io[0]);
-    }
+    // Kick start all workers
+    DEBUGF("Waiting for %d workers to finish\n", n_workers);
 
     // Set signal and atexit() after spawning childs (!).
     if (! (g_flags & FL_IS_QUIET)) {
@@ -582,7 +608,7 @@ fast_forward_pid(pid_t target) {
         signal(SIGINT, SIG_DFL);
         signal(SIGTERM, SIG_DFL);
         if (g_ff_pidp) {
-            g_ff_final_pid = (*g_ff_pidp + 1);
+            g_ff_next_pid = (*g_ff_pidp + 1) % g_max_pid;
             munmap(g_ff_pidp, sizeof *g_ff_pidp);
             g_ff_pidp = NULL;
         }

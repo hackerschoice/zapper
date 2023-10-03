@@ -12,7 +12,7 @@ zapper: zapper.c
 
 clean:
 	rm -f zapper 2>/dev/null
-	$(MAKE) -C tests clean
+	if [ -f tests/Makefile ]; then $(MAKE) -C tests clean; fi
 
 tests:
 	$(MAKE) -C tests
