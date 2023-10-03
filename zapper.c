@@ -69,6 +69,7 @@
 #include <sys/uio.h>
 #include <sys/mman.h>
 #include <linux/ptrace.h>
+#include <elf.h>
 #include <syscall.h>
 
 #include <stdio.h>
@@ -79,16 +80,29 @@
 #include <fcntl.h>
 #include <signal.h>
 
-#if __WORDSIZE == 64
-#define OAX(reg) (reg).orig_rax
-#define AX(reg)  (reg).rax
-#define SP(reg)  (reg).rsp
-#define IP(reg)  (reg).rip
-#else
-#define OAX(reg) (reg).orig_eax
-#define AX(reg)  (reg).eax
-#define SP(reg)  (reg).esp
-#define IP(reg)  (reg).eip
+// Dump all Pre-processor defines: echo | gcc -dM -E - | grep -i arm
+#if defined(__ARM_ARCH)
+# if __ARM_ARCH==6
+#  error "ARM6 not supported"  // FIXME
+// struct user_regs_struct {
+//         unsigned long int uregs[18];
+// };
+// #  define SP(reg)       (reg).uregs[13]
+# else
+#  define SP(reg)       (reg).sp
+# endif
+#else // __ARM_ARCH
+# if __WORDSIZE == 64
+#  define SP(reg)       (reg).rsp
+// #define SYSNO(reg)    (reg).orig_rax
+// #define AX(reg)       (reg).rax
+// #define IP(reg)       (reg).rip
+# else
+#  define SP(reg)       (reg).esp
+// #define SYSNO(reg)    (reg).orig_eax
+// #define AX(reg)       (reg).eax
+// #define IP(reg)       (reg).eip
+# endif
 #endif
 
 // https://elixir.bootlin.com/linux/latest/source/kernel/pid.c#L64
@@ -159,6 +173,9 @@ pid_t g_pid;
 int g_flags;
 pid_t g_pid_master;
 pid_t g_pid_zapper;
+struct iovec g_iov;  // PT registers
+struct user_regs_struct g_regs;
+
 // Fast Forwarding pids:
 #ifdef DEBUG
 # define MAX_WORKERS        (3)
@@ -247,10 +264,10 @@ read_max_pid(void) {
 
 static void
 usage(void) {
-    printf("\
+    printf("Compiled: %s\n\
 "CG"Hide command options and clear the environment of a command."CN"\n\
 \n\
-./zapper [-f] [-a name] command ...\n\
+./zapper [-fE] [-p num] [-a name] command ...\n\
   -a <name>  Rename the process to 'name'. (Use -a- for empty string).\n\
   -f         Zap all child processes as well (follow).\n\
   -E         Do not zap the environment variables.\n\
@@ -275,7 +292,7 @@ Example - Use 'exec' to replace the parent shell as well:\n\
 \n\
 Check it is working: "CDC"ps -eF f"CN"\n\
 "CDY"Join us on Telegram: "CW"https://t.me/thcorg"CN"\n\
-");
+", __DATE__);
 
     exit(0);
 }
@@ -554,7 +571,7 @@ fast_forward_pid(pid_t opt_target) {
         }
         if (stop <= pid)
             need_wraparound = 1;
-        DEBUGF("#%d STOPPING at %ld (target=%d) (cur=%ld, need_wraparound=%d)\n", i, stop, target, pid, need_wraparound);
+        DEBUGF("#%d STOPPING at %d (target=%d) (cur=%d, need_wraparound=%d)\n", i, stop, target, pid, need_wraparound);
 
         pid = fork();
         if (pid < 0) {
@@ -748,7 +765,7 @@ err:
  * Return -2 if g_pid_master exited.
  */
 static int
-ptrace_until_execve(pid_t *pidp, struct user_regs_struct *regsp, int *status) {
+ptrace_until_execve(pid_t *pidp, int *status) {
     int signum;
     siginfo_t sigi;
     pid_t pid = *pidp;
@@ -836,7 +853,7 @@ ptrace_until_execve(pid_t *pidp, struct user_regs_struct *regsp, int *status) {
                         ptsetoptions(cpid);
                         XFAIL(ptrace(PTRACE_CONT, cpid, NULL, NULL) == -1, "ptrace(%lu): %s\n", cpid, strerror(errno));
                         break;
-                    case PTRACE_EVENT_EXEC:  // 4
+                    case PTRACE_EVENT_EXEC: // 4
                         // Catch execve() after returning from syscall.
                         // Trap when the SYSCALL exit occurs...
                         ptrace(PTRACE_SYSCALL, pid, NULL, NULL);
@@ -878,10 +895,10 @@ ptrace_until_execve(pid_t *pidp, struct user_regs_struct *regsp, int *status) {
             continue;
         }
 
-        if (ptrace(PTRACE_GETREGS, pid, NULL, regsp) == -1)
-            GOTOERR("ptrace(GETREGS, %d): %s\n", pid, strerror(errno));
-        if (OAX(*regsp) != SYS_execve)
-            ERREXIT(255, "Not SYS_execve()\n"); // CAN NOT HAPPEN. We only trap execve().
+        if (ptrace(PTRACE_GETREGSET, pid, NT_PRSTATUS, &g_iov) == -1)
+            GOTOERR("ptrace(GETREGSET, %d): %s\n", pid, strerror(errno));
+        // if (SYSNO(*regsp) != SYS_execve)
+            // ERREXIT(255, "Not SYS_execve()\n"); // CAN NOT HAPPEN. We only trap execve().
 
         // Linux prior 5.3 does not have GET_SYSCALL_INFO.
         int ret = 1;
@@ -903,6 +920,7 @@ ptrace_until_execve(pid_t *pidp, struct user_regs_struct *regsp, int *status) {
                 ERREXIT(255, "ptrace(%d)=%d %s\n", pid, ret, strerror(errno));
             // HERE: No PTRACE_GET_SYSCALL_INFO.
             // This can happen if using the Linux >= 5.3 static binary on Linux < 5.3
+            ret = 1;
         }
 #else
 # warning "No PTRACE_GET_SYSCALL_INFO defined. Linux < 5.3? Using compat mode."
@@ -921,7 +939,7 @@ err:
 }
 
 static pid_t
-start_trace_parent(const char *orig_prog, char *new_argv[], struct user_regs_struct *regsp) {
+start_trace_parent(const char *orig_prog, char *new_argv[]) {
     pid_t pid;
     pid_t pid_tracee;
     int ret;
@@ -998,7 +1016,7 @@ start_trace_parent(const char *orig_prog, char *new_argv[], struct user_regs_str
     close(up[0]);
     DEBUGF("Tracing %d\n", pid_tracee);
 
-    ret = ptrace_until_execve(&pid_tracee, regsp, &status);
+    ret = ptrace_until_execve(&pid_tracee, &status);
     if (ret > 0)
         return pid_tracee;
     
@@ -1010,7 +1028,7 @@ err:
 }
 
 static void
-fix_stack(pid_t pid, struct user_regs_struct *regsp)
+fix_stack(pid_t pid)
 {
     size_t stack_sz;
     char *stack;
@@ -1031,23 +1049,23 @@ fix_stack(pid_t pid, struct user_regs_struct *regsp)
     // of the tracee anyway, so why deny access???) 
     for (errno = 0, idx = 0, stackp = NULL; errno == 0; idx++) {
         stackp = realloc(stackp, (idx + 1) * sizeof (void *));
-        stackp[idx] = ptrace(PTRACE_PEEKDATA, pid, SP(*regsp) + idx * sizeof (void *), NULL);
+        stackp[idx] = ptrace(PTRACE_PEEKDATA, pid, SP(g_regs) + idx * sizeof (void *), NULL);
     }
-    stack_end = SP(*regsp) + (idx - 1) * sizeof (void *);
+    stack_end = SP(g_regs) + (idx - 1) * sizeof (void *);
     stack = (char *)stackp;
 
-    stack_sz = stack_end - SP(*regsp);
-    DEBUGF("=> SP 0x%lx-0x%lx (stack_sz=%zu)\n", (unsigned long)SP(*regsp), stack_end, stack_sz);
+    stack_sz = stack_end - SP(g_regs);
+    DEBUGF("=> SP 0x%lx-0x%lx (stack_sz=%zu)\n", (unsigned long)SP(g_regs), stack_end, stack_sz);
 
     stack = calloc(1, stack_sz);
     XFAIL(stack == NULL, "calloc(): %s\n", strerror(errno));
     stackp = (unsigned long *)stack;
-    ptpeekcpy(stack, pid, (void *)SP(*regsp), stack_sz);
+    ptpeekcpy(stack, pid, (void *)SP(g_regs), stack_sz);
 
     dumpfile("stack.dat", stack, stack_sz);
     DEBUGF("argc     = %lx\n", stackp[0]);
     DEBUGF("&argv[0] = %lx\n", stackp[1]);
-    char *str = &stack[stackp[1] - SP(*regsp)];
+    char *str = &stack[stackp[1] - SP(g_regs)];
     DEBUGF("argv[0]  = '"CDR"%s""'\n"CN,  str);
     // Make argv0 smaller (See Note #2)
     char *end = str + strlen(str);
@@ -1059,7 +1077,7 @@ fix_stack(pid_t pid, struct user_regs_struct *regsp)
     fprintf(out, "ARGS=");
     while ((void *)stackp[idx + 1] != NULL) {
         // DEBUGF("%lx\n", stackp[idx +1 ]);
-        fprintf(out, "'%s' ", &stack[stackp[idx + 1] - SP(*regsp)]);
+        fprintf(out, "'%s' ", &stack[stackp[idx + 1] - SP(g_regs)]);
         idx++;
     }
     fprintf(out, "\n");
@@ -1068,34 +1086,34 @@ fix_stack(pid_t pid, struct user_regs_struct *regsp)
     // Find lowest address (which normally is ARGV[0] but dont have to be).
     size_t len = 0;
     valp = &stackp[1];
-    argv0_ofs = stackp[1] - SP(*regsp);
+    argv0_ofs = stackp[1] - SP(g_regs);
     unsigned long arg_min = stack_end;
-    unsigned long arg_max = SP(*regsp);
+    unsigned long arg_max = SP(g_regs);
     for (; *valp != 0x00 /* NULL */; valp++) {
         arg_min = MIN(arg_min, *valp);
         arg_max = MAX(arg_max, *valp);
     }
-    arg_max += strlen(&stack[arg_max - SP(*regsp)]) + 1;
+    arg_max += strlen(&stack[arg_max - SP(g_regs)]) + 1;
     valp++; // Skip NULL
 
     // Skip through envp and find start of elf-table
     // stack_envp = valp;
     envv0_ofs = (valp - &stackp[0]) * sizeof (void *); 
     unsigned long env_min = stack_end;
-    unsigned long env_max = SP(*regsp);
+    unsigned long env_max = SP(g_regs);
     for (; *valp != 0x00 /* NULL */; valp++) {
         env_min = MIN(env_min, *valp);
         env_max = MAX(env_max, *valp);
     }
-    env_max += strlen(&stack[env_max - SP(*regsp)]) + 1;
+    env_max += strlen(&stack[env_max - SP(g_regs)]) + 1;
     valp++; // Skip NULL
 
     unsigned long smin, smax;
     smin = MIN(arg_min, env_min);
     smax = MAX(arg_max, env_max);
 
-    DEBUGF("ARG from +%lu to +%llu (%lu bytes)\n", arg_min - (unsigned long)SP(*regsp), arg_max - SP(*regsp), arg_max - arg_min);
-    DEBUGF("ENV from +%lu to +%llu (%lu bytes)\n", env_min - (unsigned long)SP(*regsp), env_max - SP(*regsp), env_max - env_min);
+    DEBUGF("ARG from +%lu to +%llu (%lu bytes)\n", arg_min - (unsigned long)SP(g_regs), arg_max - SP(g_regs), arg_max - arg_min);
+    DEBUGF("ENV from +%lu to +%llu (%lu bytes)\n", env_min - (unsigned long)SP(g_regs), env_max - SP(g_regs), env_max - env_min);
     // valp now points to start of ELF Table.
     DEBUGF("stackp 0x%lx valp 0x%lx\n", (unsigned long)stackp, (unsigned long)valp);
     elft_idx = valp - stackp; // this is INDEX, not offset.
@@ -1109,14 +1127,14 @@ fix_stack(pid_t pid, struct user_regs_struct *regsp)
         // find the largest to determine where the randomized stack starts.
         if (stackp[idx] == 0x0f) {
             // pointer to AT_PLATFORM string.
-            ofs = stackp[idx + 1] - SP(*regsp);
+            ofs = stackp[idx + 1] - SP(g_regs);
             ofs += strlen(&stack[ofs]) + 1;
             if (ofs > spare_ofs)
                 spare_ofs = ofs;
         }
         if (stackp[idx] == 0x19) {
             // pointer to AT_RANDOM (16 bytes).
-            ofs = stackp[idx + 1] - SP(*regsp) + 16;
+            ofs = stackp[idx + 1] - SP(g_regs) + 16;
             if (ofs > spare_ofs)
                 spare_ofs = ofs;
         }
@@ -1153,7 +1171,7 @@ fix_stack(pid_t pid, struct user_regs_struct *regsp)
             case 0x18:  // AT_BASE_PLATFORM
                 if (stackp[idx + 1] == 0)
                     break; // Value is NULL (not set)
-                if (stackp[idx + 1] - SP(*regsp) > stack_sz) {
+                if (stackp[idx + 1] - SP(g_regs) > stack_sz) {
                     DEBUGF("[0x%02x] Value outside of fake stack: 0x%lx\n", (unsigned int)stackp[idx], stackp[idx + 1]);
                     break; // Address is at higher address that wasnt moved.
                 }
@@ -1168,7 +1186,7 @@ fix_stack(pid_t pid, struct user_regs_struct *regsp)
     while (*valp != 0)
         *valp++ -= len;
     // ZAP argv
-    memset(&stack[(unsigned long)arg_min - SP(*regsp) + len], 0, arg_max - arg_min);
+    memset(&stack[(unsigned long)arg_min - SP(g_regs) + len], 0, arg_max - arg_min);
 
     // Adjust address off all env-pointers
     valp = (unsigned long *)&stack[envv0_ofs];
@@ -1176,7 +1194,7 @@ fix_stack(pid_t pid, struct user_regs_struct *regsp)
         *valp++ -= len;
     // ZAP env
     if (g_flags & FL_ZAP_ENV)
-        memset(&stack[(unsigned long)env_min - SP(*regsp) + len], 0, env_max - env_min);
+        memset(&stack[(unsigned long)env_min - SP(g_regs) + len], 0, env_max - env_min);
 
     // Copy g_cur_prg_name (-a name) to argv[0] (whom's location the kernel
     // references). This may overlap into ENV if g_cur_prg_name is longer
@@ -1189,12 +1207,12 @@ fix_stack(pid_t pid, struct user_regs_struct *regsp)
 
     // dumpfile("stack2.dat", stack, stack_sz);
     // Increase the stack size (by decreasing the stack pointer).
-    SP(*regsp) -= len;
-    DEBUGF("New stack 0x%llx-0x%lx (size=%llu == %zu)\n", SP(*regsp), stack_end, stack_end - SP(*regsp), stack_sz);
+    SP(g_regs) -= len;
+    DEBUGF("New stack 0x%llx-0x%lx (size=%llu == %zu)\n", SP(g_regs), stack_end, stack_end - SP(g_regs), stack_sz);
 
-    ptrace(PTRACE_SETREGS, pid, NULL, regsp);
+    ptrace(PTRACE_SETREGSET, pid, NT_PRSTATUS, &g_iov);
 
-    ptpokecpy(pid, (void *)SP(*regsp), stack, stack_sz);
+    ptpokecpy(pid, (void *)SP(g_regs), stack, stack_sz);
     free(stack);
 }
 
@@ -1202,17 +1220,16 @@ static void
 follow_forever(pid_t pid)
 {
     int status;
-    struct user_regs_struct regs;
 
-    while (ptrace_until_execve(&pid, &regs, &status) > 0) {
-        fix_stack(pid, &regs);
+    while (ptrace_until_execve(&pid, &status) > 0) {
+        fix_stack(pid);
     }    
     exit(255);
 }
 
 // Trap at ELF's AT_ENTRY
 static pid_t
-start_trace(char *orig_prog, char *new_argv[], struct user_regs_struct *regsp) {
+start_trace(char *orig_prog, char *new_argv[]) {
     pid_t pid;
     char *orig_argv0 = new_argv[0];
     char *enlarged_argv0 = NULL;
@@ -1256,7 +1273,7 @@ start_trace(char *orig_prog, char *new_argv[], struct user_regs_struct *regsp) {
 
     // Try for the CHILD to be the TRACER and trace this process.
     if (!(g_flags & FL_FORCE_TRACER_IS_PARENT)) {
-        pid = start_trace_parent(orig_prog, new_argv, regsp);
+        pid = start_trace_parent(orig_prog, new_argv);
         if (pid > 0) {
             DEBUGF("Trapped PARENT pid %d\n", pid);
             if (!(g_flags & FL_FOLLOW))
@@ -1273,7 +1290,7 @@ start_trace(char *orig_prog, char *new_argv[], struct user_regs_struct *regsp) {
     g_flags |= FL_STAY_ATTACHED;
     pid = start_trace_child(orig_prog, new_argv);
     DEBUGF("[%d] Tracing child %d\n", getpid(), pid);
-    XFAIL(ptrace(PTRACE_GETREGS, pid, NULL, regsp) == -1, "ptrace(%d): %s\n", pid, strerror(errno));
+    XFAIL(ptrace(PTRACE_GETREGSET, pid, NT_PRSTATUS, &g_iov) == -1, "ptrace(%d): %s\n", pid, strerror(errno));
 done:
     if (enlarged_argv0) {
         free(enlarged_argv0);
@@ -1286,15 +1303,20 @@ done:
 int
 main(int argc, char *argv[], char *envp[]) {
     pid_t pid;
-    struct user_regs_struct regs;
     int i;
 
     init_vars();
     do_getopts(argc, argv);
 
-    pid = start_trace(argv[optind], &argv[optind], &regs);
+    // struct user_regs_struct *regsp = &ptregs.user_regs;
+    // g_iov.iov_base = &ptregs;
+    // g_iov.iov_len = sizeof ptregs;
+    // struct user_regs_struct *regsp = &ptregs.user_regs;
+    g_iov.iov_base = &g_regs;
+    g_iov.iov_len = sizeof g_regs;
+    pid = start_trace(argv[optind], &argv[optind]);
 
-    fix_stack(pid, &regs);
+    fix_stack(pid);
 
     // TRACEE is a background process _OR_ TRACER is the child process
     if (!(g_flags & FL_STAY_ATTACHED)) {
