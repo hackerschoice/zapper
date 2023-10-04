@@ -23,7 +23,6 @@ jobs:
           apk add --no-cache bash musl-dev linux-headers gcc make
           gcc -Wall -O2 -static -o zapper-linux-x86_64 zapper.c
           strip zapper-linux-x86_64
-          upx zapper-linux-x86_64
         shell: alpine.sh --root {0}
 
       - name: Setup Alpine aarch64
