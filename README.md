@@ -14,10 +14,13 @@ Example: Show only 'nmap', but without the command options:
               ^^^^^^^^^^^^^^^^^^^^ will not show
 ```
 
-Example: Hide the current shell and all sub processes as some kernel worker:
+Example: Hide a tmux-shell and all sub processes as some kernel worker:
 ```sh
-exec ./zapper -f -a'[kworker/1:0-rcu_gp]' bash -il
+exec ./zapper -f -a'[kworker/1:2-cgroup_destroy]' tmux
 ```
+
+![Screenshot 2023-10-04 at 12 06 39](https://github.com/hackerschoice/zapper/assets/5938498/a3c91951-9866-41be-96e4-7b13454b7885)
+
 
 ---
 1. Does not require *root*
@@ -37,6 +40,4 @@ make
 
 ![Screenshot 2023-10-04 at 08 10 19](https://github.com/hackerschoice/zapper/assets/5938498/f9946c10-914e-4715-a594-4285936bd829)
 
-
-![Screenshot 2023-09-08 at 09 51 25](https://github.com/hackerschoice/zapper/assets/5938498/a8c8ceaa-456e-49d5-8dd9-fa09c6ff0060)
 
