@@ -46,5 +46,6 @@ make
 ---
 How it works:
 * It uses ptrace() to [manipulates the stack's Elf-Aux-Table](https://iq.thc.org/how-does-linux-start-a-process).
+* Zapper intercepts the moment when the Kernel passes the command options to the program (during SYS_execve()): It moves the orignal options to a new memory location and then destroyes the old memory location. At this point, and from the Kernel's (and procps's) perspective, the options no longer exist. Finally, zapper fixes the pointers in the progam's Aux-Table and hands back execution to the program. The program is then tracked for any further call to fork() or execve() to do the same all over again.
 * Almost zero performance impact by using some neat ptrace-features: Tracing only execve() and fork() events (but not any other syscall).
 
