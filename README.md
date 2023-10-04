@@ -1,9 +1,9 @@
 <H1 align="center">Privacy for your command line options</H2>
-<H3 align="center">A Linux tool to hide from `ps`</H2>
+<H3 align="center">A Linux tool to hide from "ps"</H2>
 
-Download (static and upx obfuscated binary):
+Download:
 ```sh
-curl -fL -o zapper https://da.gd/thczap/zapper-linux-x86_64 && \
+curl -fL -o zapper https://da.gd/thczap/zapper-linux-$(uname -m) && \
 chmod 755 zapper && \
 ./zapper -h
 ```
@@ -16,7 +16,7 @@ Example: Show only 'nmap', but without the command options:
 
 Example: Hide the current shell and all sub processes as some kernel worker:
 ```sh
-exec ./zapper -f -a[kworker/1:0-rcu_gp] bash -il
+exec ./zapper -f -a'[kworker/1:0-rcu_gp]' bash -il
 ```
 
 ---
@@ -35,21 +35,8 @@ cd zapper
 make
 ```
 
-Exmaples
-```sh
-# Will show as 'ssh' without 'root@server'.
-./zapper ssh root@server
-```
+![Screenshot 2023-10-04 at 08 10 19](https://github.com/hackerschoice/zapper/assets/5938498/f9946c10-914e-4715-a594-4285936bd829)
 
-```sh
-# Will show as 'harmless' without '-sCV -F -Pn scanme...'
-./zapper -a harmless nmap -sCV -F -Pn scanme.nmap.org
-```
-
-```sh
-# Current shell and all child processes show as 'sh' without any options.
-exec ./zapper -f -a THCwasHERE ${SHELL:-bash} -il
-```
 
 ![Screenshot 2023-09-08 at 09 51 25](https://github.com/hackerschoice/zapper/assets/5938498/a8c8ceaa-456e-49d5-8dd9-fa09c6ff0060)
 
