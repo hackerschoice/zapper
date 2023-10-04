@@ -21,6 +21,7 @@
   *   the argv during EVENT_EXEC.)
   * - Some apps will show the process name as well as /proc/PID/exe (the
   *   executeable filename) - which is not hidden (see "Full Privacy" below).
+  * - Does not work on +s binaries (EUID,EGID).
   */
 
 // See also:
