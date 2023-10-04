@@ -57,6 +57,11 @@
 //   the options wont show up in 'ps' at all (not even for a few milliseconds
 //   between the execve() and ptrace() call.
 
+
+#ifndef ZVERSION
+# define ZVERSION   "1.1"
+#endif
+
 #define _GNU_SOURCE
 #include <sched.h>
 
@@ -294,7 +299,7 @@ Example - Use 'exec' to replace the parent shell as well:\n\
 \n\
 Check it is working: "CDC"ps -eF f"CN"\n\
 "CDY"Join us on Telegram: "CW"https://t.me/thcorg"CN"\n\
-", ZVER, __DATE__);
+", ZVERSION, __DATE__);
 
     exit(0);
 }
@@ -1074,7 +1079,7 @@ fix_stack(pid_t pid)
         // Can happen on EUID/EGID bins (even when root, e.g. inside docker container)
         // CAP_SYS_PTRACE not set
         DEBUGF("ERROR zapper: ptrace(%d): %s\n", pid, strerror(errno));
-        fprintf(stderr, "ERROR zapper: ptrace(%d): %s\n", pid, strerror(errno));
+        // fprintf(stderr, "ERROR zapper: ptrace(%d): %s\n", pid, strerror(errno));
         return;
     }
     stack_end = SP(g_regs) + (idx - 1) * sizeof (void *);
@@ -1082,12 +1087,6 @@ fix_stack(pid_t pid)
 
     stack_sz = stack_end - SP(g_regs);
     DEBUGF("=> SP 0x%lx-0x%lx (stack_sz=%zu)\n", (unsigned long)SP(g_regs), stack_end, stack_sz);
-
-    // stack = calloc(1, stack_sz);
-    // XFAIL(stack == NULL, "calloc(): %s\n", strerror(errno));
-    // stackp = (unsigned long *)stack;
-    // ptpeekcpy(stack, pid, (void *)SP(g_regs), stack_sz);
-
     dumpfile("stack.dat", stack, stack_sz);
     DEBUGF("argc     = %lx\n", stackp[0]);
     DEBUGF("&argv[0] = %lx\n", stackp[1]);

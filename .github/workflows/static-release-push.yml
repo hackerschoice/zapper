@@ -21,8 +21,9 @@ jobs:
       - name: Compile x86_64
         run: |
           apk add --no-cache bash musl-dev linux-headers gcc make
-          gcc -Wall -O2 -static -o zapper-linux-x86_64 zapper.c
-          strip zapper-linux-x86_64
+          make
+          strip zapper
+          mv zapper zapper-linux-x86_64
         shell: alpine.sh --root {0}
 
       - name: Setup Alpine aarch64
@@ -33,8 +34,9 @@ jobs:
       - name: Compile aarch64
         run: |
           apk add --no-cache bash musl-dev linux-headers gcc make
-          gcc -Wall -static -o zapper-linux-aarch64 zapper.c
-          strip zapper-linux-aarch64
+          make
+          strip zapper
+          mv zapper zapper-linux-aarch64
         shell: alpine.sh --root {0}
 
       - name: Upload binaries to release

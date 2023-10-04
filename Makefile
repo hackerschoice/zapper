@@ -1,5 +1,4 @@
-ZVER="\"1.1\""
-CFLAGS := $(CFLAGS) -DZVER=$(ZVER) -O2 -Wall
+CFLAGS := $(CFLAGS) -O2 -Wall
 
 all: zapper
 
