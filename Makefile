@@ -1,8 +1,9 @@
-
-CFLAGS := $(CFLAGS) -O2 -Wall
+ZVER="\"1.1\""
+CFLAGS := $(CFLAGS) -DZVER=$(ZVER) -O2 -Wall
 
 all: zapper
 
+# CFLAGS=-DDEBUG make clean all
 dev:
 	CFLAGS="$(CFLAGS) -DDEBUG" make zapper
 
@@ -17,5 +18,5 @@ clean:
 tests:
 	$(MAKE) -C tests
 
-.PHONY: all dev tests
+.PHONY: all dev tests clean
 

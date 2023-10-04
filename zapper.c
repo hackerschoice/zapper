@@ -83,7 +83,7 @@
 // Dump all Pre-processor defines: echo | gcc -dM -E - | grep -i arm
 #if defined(__ARM_ARCH)
 # if __ARM_ARCH==6
-#  error "ARM6 not supported"  // FIXME
+#  error "ARM6 not supported. Convince me to add support :>"  // FIXME
 // struct user_regs_struct {
 //         unsigned long int uregs[18];
 // };
@@ -209,6 +209,8 @@ init_vars()
     g_flags |= FL_STAY_ATTACHED;
     g_flags |= FL_ZAP_ENV;
     g_ff_opt_workers = MAX_WORKERS;
+    g_iov.iov_base = &g_regs;
+    g_iov.iov_len = sizeof g_regs;
 
 #ifdef DEBUG
     if (getenv("DEBUG_LOG")) {
@@ -264,21 +266,21 @@ read_max_pid(void) {
 
 static void
 usage(void) {
-    printf("Compiled: %s\n\
+    printf("Version v%s [%s]\n\
 "CG"Hide command options and clear the environment of a command."CN"\n\
 \n\
-./zapper [-fE] [-p num] [-a name] command ...\n\
+./zapper [-fE] [-n pid] [-a name] command ...\n\
   -a <name>  Rename the process to 'name'. (Use -a- for empty string).\n\
   -f         Zap all child processes as well (follow).\n\
   -E         Do not zap the environment variables.\n\
-  -p <num>   Fast forward to this pid (-p 300 if often the smallest possible)\n\
+  -n <pid>   Fast forward to this pid (-n 300 is often the smallest possible)\n\
 \n\
 Example - Start ssh but zap all options (only 'ssh' shows)\n\
     "CDR"$ "CC"./zapper "CM"ssh"CDM" root@myserver.com"CN"\n\
 Example - Start 'nmap', zap all options & make nmap appear as 'harmless':\n\
     "CDR"$ "CC"./zapper "CDC"-a harmless "CM"nmap"CDM" -sCV -F -Pn scanme.nmap.org"CN"\n\
 Example - Same but also with the lowest possibl process id:\n\
-    "CDR"$ "CC"./zapper "CDC"-a harmless -p0 "CM"nmap"CDM" -sCV -F -Pn scanme.nmap.org"CN"\n\
+    "CDR"$ "CC"./zapper "CDC"-a harmless -n0 "CM"nmap"CDM" -sCV -F -Pn scanme.nmap.org"CN"\n\
 Example - Start a PHP script as a background daemon. Hidden as 'apache2 -k...'\n\
     "CDR"$ "CDC"("CC"./zapper "CDC"-f -a '/usr/sbin/apache2 -k start' "CM"php"CDM" tool.php "CDC"&>/dev/null &)"CN"\n\
 Example - Hide tmux and all child processes as some kernel process:\n\
@@ -292,7 +294,7 @@ Example - Use 'exec' to replace the parent shell as well:\n\
 \n\
 Check it is working: "CDC"ps -eF f"CN"\n\
 "CDY"Join us on Telegram: "CW"https://t.me/thcorg"CN"\n\
-", __DATE__);
+", ZVER, __DATE__);
 
     exit(0);
 }
@@ -306,7 +308,7 @@ do_getopts(int argc, char *argv[])
     pid_t ff_opt_pid = -1;
     char *ff_optarg = NULL;
 
-    while ( (c = getopt(argc, argv, "+a:p:t:fcEhD")) != -1) {
+    while ( (c = getopt(argc, argv, "+a:n:t:fcEhD")) != -1) {
         switch (c) {
             case 'h':
                 usage();
@@ -336,7 +338,7 @@ do_getopts(int argc, char *argv[])
                 // e.g. shell -> zapper -> orig
                 g_flags |= FL_FORCE_TRACER_IS_PARENT;
                 break;
-            case 'p':
+            case 'n':
                 if (*optarg == '-')
                     break;  // See Note #3, '-' is used internally
                 ff_opt_pid = atoi(optarg);
@@ -373,12 +375,12 @@ do_getopts(int argc, char *argv[])
         ptr = buf;
         char *str;
         char *end = buf + sizeof buf;
-        // Construct all argv except "-p1234" or "-p 1234"
+        // Construct all argv except "-n1234" or "-n 1234"
         for (c = 1; c < argc; c++) {
             str = argv[c];
-            if (strncmp(str, "-p", 2) == 0) {
+            if (strncmp(str, "-n", 2) == 0) {
                 if (strlen(str) == 2)
-                    c++; // "-p" "1000" variant.
+                    c++; // "-n" "1000" variant.
                 continue;
             }
             if (strncmp(str, "-t", 2) == 0) {
@@ -393,9 +395,9 @@ do_getopts(int argc, char *argv[])
         fprintf(stderr, "\n\
 "CDY"Can not set the PID of a process that is started in the foreground"CN".\n\
 Instead, execute:\n\
-    "CC"./zapper "CDC"-p%s; "CC"./zapper "CDC"%s"CN"\n\
+    "CC"./zapper "CDC"-n%s; "CC"./zapper "CDC"%s"CN"\n\
 or start the process in the background:\n\
-    "CDC"("CC"./zapper "CDC"-p%s %s &>/dev/null &)"CN"\n", ff_optarg, buf, ff_optarg, buf);
+    "CDC"("CC"./zapper "CDC"-n%s %s &>/dev/null &)"CN"\n", ff_optarg, buf, ff_optarg, buf);
         exit(255);
     }
     
@@ -436,7 +438,7 @@ or start the process in the background:\n\
             // Note #3:
             // _THIS_ process will stay attached (wont exit) and thus needs
             // to claim the new pid by forking and executing itself.
-            // Destroy the -p option (with '-') to prevent
+            // Destroy the -n option (with '-') to prevent
             // executing this part twice.
             *ff_optarg = '-';
             pid_t pid;
@@ -635,25 +637,25 @@ fast_forward_pid(pid_t opt_target) {
 }
 
 // Read data from pid@src to dest.
-static void
-ptpeekcpy(void *dst, pid_t pid, void *src, size_t n)
-{
-    void *src_end = src + n;
+// static void
+// ptpeekcpy(void *dst, pid_t pid, void *src, size_t n)
+// {
+//     void *src_end = src + n;
 
-    while (src_end - src >= sizeof (long)) {
-        data.val = ptrace(PTRACE_PEEKDATA, pid, src, NULL);
-        memcpy(dst, data.c, sizeof (long));
-        dst += sizeof (long);
-        src += sizeof (long);
-    }
+//     while (src_end - src >= sizeof (long)) {
+//         data.val = ptrace(PTRACE_PEEKDATA, pid, src, NULL);
+//         memcpy(dst, data.c, sizeof (long));
+//         dst += sizeof (long);
+//         src += sizeof (long);
+//     }
 
-    if (src >= src_end)
-        return;
+//     if (src >= src_end)
+//         return;
     
-    // Partial copy
-    data.val = ptrace(PTRACE_PEEKDATA, pid, src, NULL);
-    memcpy(dst, data.c, src_end - src);
-}
+//     // Partial copy
+//     data.val = ptrace(PTRACE_PEEKDATA, pid, src, NULL);
+//     memcpy(dst, data.c, src_end - src);
+// }
 
 static void
 ptpokecpy(pid_t pid, void *dst, void *src, size_t n)
@@ -759,6 +761,7 @@ err:
     return -1;
 }
 
+
 /*
  * Return SYS_execve on success.
  * Return -1 on error
@@ -770,7 +773,8 @@ ptrace_until_execve(pid_t *pidp, int *status) {
     siginfo_t sigi;
     pid_t pid = *pidp;
     void *data = NULL;
-    static int last_pid_stray_stop_signal;
+    static pid_t ss_pids[16 * 1024]; // Stray Stops
+    static int ss_idx;
 
     *status = 0;
     while(1) {
@@ -825,33 +829,46 @@ ptrace_until_execve(pid_t *pidp, int *status) {
                     case PTRACE_EVENT_EXIT: // 6
                         // EVENT_EXIT should never trigger before EVENT_FORK (?). See Note #3.
                         break;
-                    case PTRACE_EVENT_FORK:  // 1
+                    case PTRACE_EVENT_FORK: // 1
                     case PTRACE_EVENT_VFORK: ; // 2
                         unsigned long cpid;
                         XFAIL(ptrace(PTRACE_GETEVENTMSG, pid, NULL, &cpid) == -1, "ptrace(%d): %s\n", pid, strerror(errno));
                         DEBUGF(CDY"FORK "CY"%d"CDY" to cpid="CY"%lu\n"CN, pid, cpid);
+                        // Wait for the child to be stopped:
                         // It can happen that SIGSTOP for this cpid arrived before the EVENT_FORK.
-                        // In that case, by the time we get the FORK event we can no longer
+                        // In that case, by the time the EVENT_FORK happens, we can no longer
                         // wait() for the SIGSTOP signal (because it has already been delivered).
-                        // Thus we must use WNOHANG. (waitpid() returns 0 in this case and is already
-                        // stopped.).
-                        // On the other hand EVEN_FORK may be triggered before the cpid is stopped. Thus
+                        // Thus we must use WNOHANG and waitpid() will return 0 indicating that
+                        // the child has already been stopped.
+                        // On the other hand, EVEN_FORK may be triggered before the cpid is stopped. Thus
                         // we need to waitpid normally.
-                        if (cpid == last_pid_stray_stop_signal) {
-                            waitpid(cpid, NULL, WNOHANG | WUNTRACED);
-                            last_pid_stray_stop_signal = 0;
-                        } else {
-                            waitpid(cpid, NULL, WUNTRACED);
+                        // waitpid(,,WUNTRACED) => Will hang forever if SIGSTOP got delivered before EVENT_FORK
+                        // waitpid(,,WNOHANG)   => May return 0 (child exists) but PTRACE_SETOPTIONS will
+                        //                         fail with -ENOENT (No such process))
+                        // => The only way around this is to track all stray SIGSTOPs. A good test is to
+                        // use './zapper -n 500' within a zapped tmux.
+
+                        int opt = WUNTRACED;
+                        int i;
+                        for (i = 0; i < sizeof ss_pids / sizeof *ss_pids; i++) {
+                            if (ss_pids[i] != cpid)
+                                continue;
+                            ss_pids[i] = 0;
+                            opt |= WNOHANG;
+                            break;
                         }
+                        waitpid(cpid, NULL, opt);
 
                         // Note #3: cpid may have already exited (and before we received its EVENT_EXIT).
                         // The only thing we can hope for is trying to call ptsetoptions() and dont
                         // fail hard if ptsetoptions() fails (e.g. when client has already exited).
-                        // ==> Oops. this never happens???
-                        // if (ptsetoptions(cpid) != 0)
-                        //     break;  // Child has already exited.
                         ptsetoptions(cpid);
-                        XFAIL(ptrace(PTRACE_CONT, cpid, NULL, NULL) == -1, "ptrace(%lu): %s\n", cpid, strerror(errno));
+                        if (ptrace(PTRACE_CONT, cpid, NULL, NULL) == -1) {
+                            DEBUGF("ERROR zapper: ptrace(%ld): %s\n", cpid, strerror(errno));
+                            // Child may have exited already
+                            // if (errno != EIO)
+                                // fprintf(stderr, "ERROR zapper: ptrace(%ld): %s\n", cpid, strerror(errno));
+                        }
                         break;
                     case PTRACE_EVENT_EXEC: // 4
                         // Catch execve() after returning from syscall.
@@ -869,7 +886,8 @@ ptrace_until_execve(pid_t *pidp, int *status) {
             // [DEBUG zapper.c:436] FORK 42054 to cpid=42056
             if (signum == SIGSTOP) {
                 DEBUGF(CR"Stray SIGSTOP for (untracked?) pid=%d (status=%d)\n"CN, pid, *status);
-                last_pid_stray_stop_signal = pid;
+                ss_pids[ss_idx] = pid;
+                ss_idx = (ss_idx + 1) % (sizeof ss_pids / sizeof *ss_pids);
                 pid = 0; // Do not continue cpid. Continue cpid after EVENT_FORK.
                 continue;
             }
@@ -1032,7 +1050,7 @@ fix_stack(pid_t pid)
 {
     size_t stack_sz;
     char *stack;
-    unsigned long *stackp;
+    unsigned long *stackp = NULL;
     unsigned long *valp;
     unsigned long spare_ofs = 0;
     unsigned long argv0_ofs = 0;
@@ -1049,7 +1067,15 @@ fix_stack(pid_t pid)
     // of the tracee anyway, so why deny access???) 
     for (errno = 0, idx = 0, stackp = NULL; errno == 0; idx++) {
         stackp = realloc(stackp, (idx + 1) * sizeof (void *));
-        stackp[idx] = ptrace(PTRACE_PEEKDATA, pid, SP(g_regs) + idx * sizeof (void *), NULL);
+        stackp[idx] = ptrace(PTRACE_PEEKDATA, pid, (unsigned long)SP(g_regs) + idx * sizeof (void *), NULL);
+    }
+
+    if (idx <= 1) {
+        // Can happen on EUID/EGID bins (even when root, e.g. inside docker container)
+        // CAP_SYS_PTRACE not set
+        DEBUGF("ERROR zapper: ptrace(%d): %s\n", pid, strerror(errno));
+        fprintf(stderr, "ERROR zapper: ptrace(%d): %s\n", pid, strerror(errno));
+        return;
     }
     stack_end = SP(g_regs) + (idx - 1) * sizeof (void *);
     stack = (char *)stackp;
@@ -1057,10 +1083,10 @@ fix_stack(pid_t pid)
     stack_sz = stack_end - SP(g_regs);
     DEBUGF("=> SP 0x%lx-0x%lx (stack_sz=%zu)\n", (unsigned long)SP(g_regs), stack_end, stack_sz);
 
-    stack = calloc(1, stack_sz);
-    XFAIL(stack == NULL, "calloc(): %s\n", strerror(errno));
-    stackp = (unsigned long *)stack;
-    ptpeekcpy(stack, pid, (void *)SP(g_regs), stack_sz);
+    // stack = calloc(1, stack_sz);
+    // XFAIL(stack == NULL, "calloc(): %s\n", strerror(errno));
+    // stackp = (unsigned long *)stack;
+    // ptpeekcpy(stack, pid, (void *)SP(g_regs), stack_sz);
 
     dumpfile("stack.dat", stack, stack_sz);
     DEBUGF("argc     = %lx\n", stackp[0]);
@@ -1308,12 +1334,6 @@ main(int argc, char *argv[], char *envp[]) {
     init_vars();
     do_getopts(argc, argv);
 
-    // struct user_regs_struct *regsp = &ptregs.user_regs;
-    // g_iov.iov_base = &ptregs;
-    // g_iov.iov_len = sizeof ptregs;
-    // struct user_regs_struct *regsp = &ptregs.user_regs;
-    g_iov.iov_base = &g_regs;
-    g_iov.iov_len = sizeof g_regs;
     pid = start_trace(argv[optind], &argv[optind]);
 
     fix_stack(pid);
