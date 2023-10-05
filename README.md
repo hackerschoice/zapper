@@ -21,6 +21,7 @@ exec ./zapper -f -a'[kworker/1:2-cgroup_destroy]' tmux
 ```
 
 ![Screenshot 2023-10-04 at 12 06 39](https://github.com/hackerschoice/zapper/assets/5938498/a3c91951-9866-41be-96e4-7b13454b7885)
+<p align="center"><i></i>showing 6 hidden processes: tmux, bash, nmap, sleep, ps, grep</i></p>
 
 
 ---
