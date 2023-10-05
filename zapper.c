@@ -79,6 +79,7 @@
 #include <syscall.h>
 
 #include <stdio.h>
+#include <stdarg.h>
 #include <unistd.h>
 #include <stdlib.h>
 #include <errno.h>
@@ -270,9 +271,75 @@ read_max_pid(void) {
     return max;
 }
 
+// It is faster to demove the \x1b...m after if no tty (no color)
+static void
+cprintf(FILE *fp, const char *fmt, ...) {
+    va_list ap;
+    char *buf;
+    char *ptr;
+    char *dst;
+    char *end;
+    static int tty_mode;
+    int ret;
+
+    // Check once if STDOUT is a TTY (e.g. color output)
+    if (tty_mode == 0) {
+        tty_mode = -1; // NO COLOR
+        if (isatty(STDOUT_FILENO))
+            tty_mode = 1; // COLOR
+    }
+
+    va_start(ap, fmt);
+
+    if (tty_mode == 1) {
+        // Color output & return.
+        vfprintf(fp, fmt, ap); 
+        goto end;
+    }
+
+    // HERE: Not a TTY => Remove color ANSI codes from string.
+    buf = malloc(4096);
+    ptr = buf;
+    dst = buf;
+
+    ret = vsnprintf(buf, 4096, fmt, ap);
+    if (ret >= 4096) {
+        buf = realloc(buf, ret + 1);
+        ptr = buf;
+        ret = vsnprintf(buf, ret + 1, fmt, ap);
+    }
+
+    dst = buf;
+    ptr = buf;
+    end = buf + ret + 1;
+    // Filter out the colors
+    while (ptr < end) {
+        if (*ptr == '\x1b') {
+            ptr++;
+            while (ptr < end) {
+                if (*ptr == 'm') {
+                    ptr++;
+                    break;
+                }
+                ptr++;
+            }
+        }
+        *dst = *ptr;
+        if (*ptr == '\0')
+            break;
+        ptr++;
+        dst++;
+    }
+    fprintf(fp, "%s", buf);
+    free(buf);
+
+end:
+    va_end(ap);
+}
+
 static void
 usage(void) {
-    printf("Version v%s [%s]\n\
+    cprintf(stderr, "Version v%s [%s]\n\
 "CG"Hide command options and clear the environment of a command."CN"\n\
 \n\
 ./zapper [-fE] [-n pid] [-a name] command ...\n\
@@ -398,7 +465,7 @@ do_getopts(int argc, char *argv[])
         }
         // Lying: More precise: Can not set the PID of a process that
         // is part of the job-control of the shell...
-        fprintf(stderr, "\n\
+        cprintf(stderr, "\n\
 "CDY"Can not set the PID of a process that is started in the foreground"CN".\n\
 Instead, execute:\n\
     "CC"./zapper "CDC"-n%s; "CC"./zapper "CDC"%s"CN"\n\
@@ -436,7 +503,7 @@ or start the process in the background:\n\
                     snprintf(buf, sizeof buf, " ("CDR"PIDs < %d are reserverd and inaccessible"CN")", RESERVED_PIDS);
 
                 g_ff_next_pid = MAX(RESERVED_PIDS, g_ff_next_pid);
-                printf(CDG"SUCCESS"CN". Next process will start with PID "CDY"%d"CN"%s.\n", g_ff_next_pid, buf);
+                cprintf(stdout, CDG"SUCCESS"CN". Next process will start with PID "CDY"%d"CN"%s.\n", g_ff_next_pid, buf);
             }
             exit(0);
         }
@@ -611,7 +678,7 @@ fast_forward_pid(pid_t opt_target) {
     DEBUGF("Waiting for %d workers to finish\n", n_workers);
 
     // Set signal and atexit() after spawning childs (!).
-    if (! (g_flags & FL_IS_QUIET)) {
+    if (isatty(STDOUT_FILENO) && (! (g_flags & FL_IS_QUIET))) {
         signal(SIGINT, cb_reset);
         signal(SIGTERM, cb_reset);
         g_flags |= FL_IS_CURSOR_OFF;
@@ -626,7 +693,7 @@ fast_forward_pid(pid_t opt_target) {
         n_workers--;
     }
 
-    if (! (g_flags & FL_IS_QUIET)) {
+    if (g_flags & FL_IS_CURSOR_OFF) {
         // Output statistics
         fprintf(stderr, "\r\e[?25h\e[K\r");
         signal(SIGALRM, SIG_DFL);
