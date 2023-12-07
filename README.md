@@ -3,7 +3,7 @@
 
 Download:
 ```sh
-curl -fL -o zapper https://github.com/hackerschoice/zapper/releases/latest/download/zapper-$(uname -m) && \
+curl -fL -o zapper https://github.com/hackerschoice/zapper/releases/latest/download/zapper-linux-$(uname -m) && \
 chmod 755 zapper && \
 ./zapper -h
 ```
