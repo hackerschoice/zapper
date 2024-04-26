@@ -1,0 +1,34 @@
+name: Static Stealth Build
+on: [workflow_dispatch]
+
+permissions:
+  contents: write
+
+
+
+jobs:
+  Linux-Cross:
+    strategy:
+      matrix:
+        arch: [x86_64, aarch64]
+    runs-on: ubuntu-latest
+    container:
+      image: muslcc/x84_64:${{ matrix.arch }}}-linux-musl
+    steps:
+      - uses: actions/checkout@v3
+      - name: Add build dependencies
+        run: |
+          apk add --update --no-cache --no-progress bash musl-dev linux-headers gcc make upx
+
+      - name: Compiling-${{ matrix.arch }}
+        run: |
+          gcc -Wall -DSTEALTH -static -o zapper zapper.c
+          strip zapper
+          upx zapper
+          mv zapper zapper-stealth-linux-${{ matrix.arch }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: zapper
+          path: zapper-stealth-linux-${{ matrix.arch }}

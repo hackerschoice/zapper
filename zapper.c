@@ -339,6 +339,7 @@ end:
 
 static void
 usage(void) {
+#ifndef STEALTH
     cprintf(stderr, "Version v%s [%s]\n\
 "CG"Hide command options and clear the environment of a command."CN"\n\
 \n\
@@ -368,6 +369,7 @@ Example - Use 'exec' to replace the parent shell as well:\n\
 Check it is working: "CDC"ps -eF f"CN"\n\
 "CDY"Join us on Telegram: "CW"https://t.me/thcorg"CN"\n\
 ", ZVERSION, __DATE__);
+#endif
 
     exit(0);
 }
