@@ -4,7 +4,8 @@ on: [workflow_dispatch]
 permissions:
   contents: write
 
-
+env:
+  VER: 1.1
 
 jobs:
   Linux-Cross:
@@ -27,8 +28,20 @@ jobs:
           upx zapper
           mv zapper zapper-stealth-linux-${{ matrix.arch }}
 
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v3
+      - name: Upload binaries to release
+        uses: svenstaro/upload-release-action@v2
         with:
-          name: zapper
-          path: zapper-stealth-linux-${{ matrix.arch }}
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: zapper-*
+          file_glob: true
+          overwrite: true
+          tag: v${{ env.VER }}
+          # body: "Zap away the command line options"
+        
+      - name: Upload to release
+        uses: actions/upload-artifact@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: zapper-stealth-linux-${{ matrix.arch }}
+          overwrite: true
+          tag: v${{ env.VER }}
