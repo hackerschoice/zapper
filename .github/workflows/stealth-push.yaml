@@ -13,7 +13,7 @@ jobs:
         arch: [x86_64, aarch64]
     runs-on: ubuntu-latest
     container:
-      image: muslcc/x84_64:${{ matrix.arch }}}-linux-musl
+      image: muslcc/x84_64:${{ matrix.arch }}-linux-musl
     steps:
       - uses: actions/checkout@v3
       - name: Add build dependencies
