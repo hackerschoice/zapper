@@ -19,11 +19,11 @@ jobs:
       - uses: actions/checkout@v3
       - name: Add build dependencies
         run: |
-          apk add --update --no-cache --no-progress bash musl-dev linux-headers gcc make upx
+          apk add --update --no-cache --no-progress upx
 
       - name: Compiling-${{ matrix.arch }}
         run: |
-          gcc -Wall -DSTEALTH --target=${{ matrix.arch }} -static -o zapper zapper.c
+          gcc -Wall -DSTEALTH -static -o zapper zapper.c
           strip zapper
           upx zapper
           mv zapper zapper-stealth-linux-${{ matrix.arch }}
