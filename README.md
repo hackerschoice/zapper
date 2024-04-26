@@ -3,7 +3,7 @@
 
 Download:
 ```sh
-curl -fL -o zapper https://da.gd/thczap/zapper-linux-$(uname -m) && \
+curl -fL -o zapper https://github.com/hackerschoice/zapper/releases/latest/download/zapper-linux-$(uname -m) && \
 chmod 755 zapper && \
 ./zapper -h
 ```
@@ -15,12 +15,13 @@ Example: Show only 'nmap', but without the command options:
                      will not show
 ```
 
-Example: Replace the current shell with a hidden tmux/shell. Hide all sub processes (`-f`) and pretend to be some kernel worker (`-a`) without showing any command line options:
+Example: Replace the current shell with a hidden tmux/shell. Hide all sub processes (`-f`), take on the name of some kernel process (`-a`) and hide all command line options:
 ```sh
 exec ./zapper -f -a'[kworker/1:2-cgroup_destroy]' tmux
 ```
 
 ![Screenshot 2023-10-04 at 12 06 39](https://github.com/hackerschoice/zapper/assets/5938498/a3c91951-9866-41be-96e4-7b13454b7885)
+<p align="center"><i></i>showing 6 hidden processes: tmux, bash, nmap, sleep, ps, grep</i></p>
 
 
 ---
