@@ -467,12 +467,14 @@ do_getopts(int argc, char *argv[])
         }
         // Lying: More precise: Can not set the PID of a process that
         // is part of the job-control of the shell...
+#ifndef STEALTH
         cprintf(stderr, "\n\
 "CDY"Can not set the PID of a process that is started in the foreground"CN".\n\
 Instead, execute:\n\
     "CC"./zapper "CDC"-n%s; "CC"./zapper "CDC"%s"CN"\n\
 or start the process in the background:\n\
     "CDC"("CC"./zapper "CDC"-n%s %s &>/dev/null &)"CN"\n", ff_optarg, buf, ff_optarg, buf);
+#endif
         exit(255);
     }
     
